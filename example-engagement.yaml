@@ -41,3 +41,8 @@ agent:
   # max_llm_total_tokens: 500000
   # max_llm_cost_usd: 25.0
   # max_wall_clock_seconds: 7200
+
+# Per-tool defaults merged into calls when the LLM omits or blanks an argument (gobuster_dir: wordlist).
+# tool_defaults:
+#   gobuster_wordlist: "/usr/share/wordlists/dirb/common.txt"
+#   masscan_max_rate: 100000   # caps masscan --rate (default cap: dixie.constants.DEFAULT_MASSCAN_MAX_RATE)

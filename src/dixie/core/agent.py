@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from ipaddress import IPv4Network
+import ipaddress
 
 from rich.console import Console
 from rich.panel import Panel
@@ -20,6 +20,7 @@ from dixie.core.schema import (
     Severity,
     ToolResult,
 )
+from dixie.constants import DEFAULT_MASSCAN_MAX_RATE
 from dixie.models.llm import LLMClient
 from dixie.tools.base import ToolRegistry
 
@@ -28,12 +29,28 @@ console = Console()
 
 
 def _is_subnet(target: str) -> bool:
-    """Check if target is a CIDR subnet rather than a single host."""
+    """Check if target is a CIDR subnet rather than a single host (IPv4 or IPv6)."""
     try:
-        net = IPv4Network(target, strict=False)
+        net = ipaddress.ip_network(target, strict=False)
         return net.num_addresses > 1
     except (ValueError, TypeError):
         return False
+
+
+def _tool_error_retry_fruitless(error: str) -> bool:
+    """True when repeating the same command is unlikely to fix the failure."""
+    e = error.lower()
+    return any(
+        needle in e
+        for needle in (
+            "usage:",
+            "need root",
+            "needs root",
+            "command not found",
+            "not permitted",
+            "invalid option",
+        )
+    )
 
 
 class Agent:
@@ -184,6 +201,29 @@ class Agent:
             return True
         return name not in RECON_BLOCKED_TOOLS
 
+    def _merge_engagement_tool_defaults(self, name: str, arguments: dict) -> dict:
+        """Apply engagement YAML tool defaults for missing or empty tool arguments."""
+        merged = dict(arguments)
+        if name == "gobuster_dir":
+            override = self.config.tool_defaults.gobuster_wordlist
+            if override:
+                cur = merged.get("wordlist")
+                if cur is None or (isinstance(cur, str) and cur.strip() == ""):
+                    merged["wordlist"] = override
+        if name == "masscan":
+            cap = self.config.tool_defaults.masscan_max_rate
+            if cap is None:
+                cap = DEFAULT_MASSCAN_MAX_RATE
+            merged["_masscan_rate_cap"] = cap
+            r = merged.get("rate")
+            if r is not None:
+                try:
+                    rv = int(r)
+                    merged["rate"] = max(1, min(rv, cap))
+                except (TypeError, ValueError):
+                    pass
+        return merged
+
     def _execute_tool(self, name: str, arguments: dict) -> str:
         """Execute a tool and return the result as a string."""
         if name == "report_finding":
@@ -201,13 +241,39 @@ class Agent:
         if not tool:
             return json.dumps({"error": f"Unknown tool: {name}"})
 
+        arguments = self._merge_engagement_tool_defaults(name, arguments)
         command = tool.build_command(**arguments)
         console.print(f"  [dim]$ {' '.join(command)}[/dim]")
 
-        if self.use_docker:
-            result = self.sandbox.run_command(command, name)
-        else:
-            result = self.sandbox.run_local(command, name)
+        max_retry = self.config.agent.max_tool_retries
+        result: ToolResult | None = None
+        prev_error: str | None = None
+        for attempt in range(max_retry + 1):
+            if self.use_docker:
+                result = self.sandbox.run_command(command, name)
+            else:
+                result = self.sandbox.run_local(command, name)
+
+            if result.success:
+                break
+            err = result.error or ""
+            if attempt < max_retry:
+                if (
+                    prev_error is not None
+                    and err == prev_error
+                    and _tool_error_retry_fruitless(err)
+                ):
+                    break
+                prev_error = err
+                console.print(
+                    f"  [yellow]Tool failed (attempt {attempt + 1}/{max_retry + 1}), "
+                    f"retrying…[/yellow]"
+                )
+                time.sleep(min(2.0, 0.25 * (2**attempt)))
+
+        if result is None:
+            logger.error("Tool execution loop produced no result")
+            return json.dumps({"error": "Internal error: missing tool result"})
 
         self.state.add_result(result)
 
@@ -273,6 +339,18 @@ class Agent:
 
             response = self.llm.chat(prompt)
 
+            if response.get("error"):
+                err = response["error"]
+                console.print(f"[red]LLM error: {err}[/red]")
+                self.state.termination_reason = f"llm_error ({err})"
+                break
+
+            if response.get("tool_json_error"):
+                tje = response["tool_json_error"]
+                console.print(f"[red]LLM tool JSON error: {tje}[/red]")
+                self.state.termination_reason = f"llm_tool_json_error ({tje})"
+                break
+
             if response["content"]:
                 console.print(Panel(response["content"], title="[yellow]Thinking[/yellow]"))
 
@@ -297,7 +375,9 @@ class Agent:
                 result_str = self._execute_tool(tc["name"], tc["arguments"])
                 self.llm.submit_tool_result(tc["id"], result_str)
 
-                console.print(f"  [dim]Result: {result_str[:200]}...[/dim]")
+                preview = result_str[:200]
+                suffix = "..." if len(result_str) > 200 else ""
+                console.print(f"  [dim]Result: {preview}{suffix}[/dim]")
 
             context = self._build_context()
             prompt = (

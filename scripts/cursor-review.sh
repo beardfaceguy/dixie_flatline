@@ -11,7 +11,10 @@
 #   - Runs with `--mode=ask` (read-only for the agent).
 #   - Uses workspace = repo root so AGENTS.md and .cursor/rules are in scope.
 #   - Override model: CURSOR_REVIEW_MODEL or --model.
-#   - For pre-commit style blocking: CURSOR_REVIEW_BLOCK=1 on BLOCKER findings.
+#   - For pre-commit style blocking: CURSOR_REVIEW_BLOCK=1 exits 1 when this pass
+#     reports FAIL. Set CURSOR_REVIEW_BLOCK_CUMULATIVE=1 to also exit 1 when the
+#     findings log still contains [BLOCKER] from an earlier run (unless this run
+#     truncated the log).
 #   - Bypass entirely: CURSOR_REVIEW_SKIP=1
 #
 set -u
@@ -50,7 +53,23 @@ General:
   -h, --help        This message
 
 Environment: CURSOR_REVIEW_SKIP, CURSOR_REVIEW_MODEL, CURSOR_REVIEW_MAX_BYTES,
-             CURSOR_REVIEW_BLOCK (=1 to exit 1 on [BLOCKER] after review)
+             CURSOR_REVIEW_BLOCK (=1 to exit 1 when this pass reports FAIL)
+             CURSOR_REVIEW_BLOCK_CUMULATIVE (=1 to also exit 1 when the findings
+               log still has [BLOCKER] unless this run used a fresh-truncated log)
+             CURSOR_REVIEW_PASSES (default 1) — run N agent review rounds; each
+               round appends new issues to the findings log and tells the next
+               round to ignore everything logged so far (within --ignore-max-lines).
+             CURSOR_REVIEW_FINDINGS_LOG — path to cumulative issue list (default:
+               WORKSPACE/.cursor-review-findings.log), readable after the script exits.
+             CURSOR_REVIEW_FRESH_FINDINGS_LOG (=1) — truncate the log before this run.
+             CURSOR_REVIEW_IGNORE_MAX_LINES — max tail lines of the log injected into
+               later passes (default 800); avoids blowing the prompt if the log grows.
+
+Multi-pass options:
+  --passes N               Run N review iterations (default 1).
+  --findings-log PATH      Append-only log of [BLOCKER]/[WARNING]/[NIT] lines.
+  --fresh-findings-log     Empty the findings log before this invocation.
+  --ignore-max-lines N     Cap how many prior findings are echoed into the prompt.
 
 Examples:
   cursor-review.sh
@@ -58,6 +77,7 @@ Examples:
   cursor-review.sh --since origin/main
   cursor-review.sh --repo-index
   cursor-review.sh --read src/dixie/cli.py --read tests/test_tools.py
+  cursor-review.sh --repo-index --passes 3 --fresh-findings-log
 USAGE_EOF
 }
 
@@ -76,6 +96,10 @@ DIFF_EXPLICIT=0
 WORKSPACE=""
 MODEL_OVERRIDE=""
 MAX_BYTES="${CURSOR_REVIEW_MAX_BYTES:-200000}"
+PASSES="${CURSOR_REVIEW_PASSES:-1}"
+FINDINGS_LOG_CLI=""
+FRESH_FINDINGS_LOG=0
+IGNORE_MAX_LINES="${CURSOR_REVIEW_IGNORE_MAX_LINES:-800}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -141,6 +165,25 @@ while [[ $# -gt 0 ]]; do
       MAX_BYTES="$2"
       shift 2
       ;;
+    --passes)
+      [[ $# -ge 2 ]] || { echo "cursor-review: --passes requires N" >&2; exit 2; }
+      PASSES="$2"
+      shift 2
+      ;;
+    --findings-log)
+      [[ $# -ge 2 ]] || { echo "cursor-review: --findings-log requires PATH" >&2; exit 2; }
+      FINDINGS_LOG_CLI="$2"
+      shift 2
+      ;;
+    --fresh-findings-log)
+      FRESH_FINDINGS_LOG=1
+      shift
+      ;;
+    --ignore-max-lines)
+      [[ $# -ge 2 ]] || { echo "cursor-review: --ignore-max-lines requires N" >&2; exit 2; }
+      IGNORE_MAX_LINES="$2"
+      shift 2
+      ;;
     *)
       echo "cursor-review: unknown option: $1" >&2
       usage
@@ -151,6 +194,16 @@ done
 
 if [[ ! "$MAX_BYTES" =~ ^[1-9][0-9]*$ ]]; then
   echo "cursor-review: --max-bytes / CURSOR_REVIEW_MAX_BYTES must be a positive integer (got: ${MAX_BYTES})" >&2
+  exit 2
+fi
+
+if [[ ! "$PASSES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "cursor-review: --passes / CURSOR_REVIEW_PASSES must be a positive integer (got: ${PASSES})" >&2
+  exit 2
+fi
+
+if [[ ! "$IGNORE_MAX_LINES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "cursor-review: --ignore-max-lines / CURSOR_REVIEW_IGNORE_MAX_LINES must be a positive integer (got: ${IGNORE_MAX_LINES})" >&2
   exit 2
 fi
 
@@ -174,6 +227,24 @@ fi
 IS_GIT=0
 if git -C "$WORKSPACE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   IS_GIT=1
+fi
+
+FINDINGS_LOG="${FINDINGS_LOG_CLI:-${CURSOR_REVIEW_FINDINGS_LOG:-}}"
+if [[ -z "$FINDINGS_LOG" ]]; then
+  FINDINGS_LOG="$WORKSPACE/.cursor-review-findings.log"
+fi
+# Resolve relative paths against workspace
+if [[ "$FINDINGS_LOG" != /* ]]; then
+  FINDINGS_LOG="$WORKSPACE/$FINDINGS_LOG"
+fi
+
+RUN_WAS_FRESH=0
+
+if [[ "$FRESH_FINDINGS_LOG" -eq 1 ]] || [[ "${CURSOR_REVIEW_FRESH_FINDINGS_LOG:-0}" == "1" ]]; then
+  mkdir -p "$(dirname "$FINDINGS_LOG")"
+  : > "$FINDINGS_LOG"
+  RUN_WAS_FRESH=1
+  echo "cursor-review: truncated findings log: $FINDINGS_LOG" >&2
 fi
 
 if [[ ${#READ_PATHS[@]} -gt 0 ]]; then
@@ -442,7 +513,7 @@ except Exception:
   )"
 fi
 
-PROMPT=$(cat <<EOF
+BASE_PROMPT=$(cat <<EOF
 You are reviewing code for the Dixie Flatline repository (LLM-driven red team
 framework). Scope: $SCOPE_DESC.
 
@@ -472,32 +543,90 @@ EOF
 
 echo "cursor-review: workspace=$WORKSPACE"
 echo "cursor-review: model = $MODEL_LABEL"
+echo "cursor-review: passes=$PASSES findings_log=$FINDINGS_LOG" >&2
 
-AGENT_STDERR="$(mktemp)"
-OUT=$(
-  printf '%s\n%s\n' "$PROMPT" "$CONTENT" \
-    | agent -p \
-        --trust \
-        --mode=ask \
-        --output-format text \
-        --workspace "$WORKSPACE" \
-        ${REVIEW_MODEL:+--model "$REVIEW_MODEL"} \
-        2>"$AGENT_STDERR"
+LAST_STATUS=0
+OUT=""
+RESULT=""
+for ((pass = 1; pass <= PASSES; pass++)); do
+  echo "cursor-review: --- pass $pass/$PASSES ---" >&2
+
+  IGNORE_BLOCK=""
+  if [[ -s "$FINDINGS_LOG" ]]; then
+    # Note: this embeds prior findings into the agent prompt; do not store
+    # secrets in the findings log, and avoid multi-pass if your policy forbids
+    # sending historical review text to the model provider.
+    IGNORE_BLOCK=$'\n\n'"Previously reported issues (from earlier passes and any pre-existing entries in this log). Do NOT output these again — only genuinely NEW issues not already listed below:"$'\n\n'"$(tail -n "$IGNORE_MAX_LINES" "$FINDINGS_LOG")"$'\n'
+  fi
+
+  PROMPT="${BASE_PROMPT}${IGNORE_BLOCK}"
+  if [[ "$PASSES" -gt 1 ]]; then
+    PROMPT+=$'\n\n'"This is review pass ${pass} of ${PASSES}."
+  fi
+
+  AGENT_STDERR="$(mktemp)"
+  OUT=$(
+    printf '%s\n%s\n' "$PROMPT" "$CONTENT" \
+      | agent -p \
+          --trust \
+          --mode=ask \
+          --output-format text \
+          --workspace "$WORKSPACE" \
+          ${REVIEW_MODEL:+--model "$REVIEW_MODEL"} \
+          2>"$AGENT_STDERR"
+  )
+  LAST_STATUS=$?
+  if [[ -s "$AGENT_STDERR" ]]; then
+    echo "cursor-review: agent stderr (pass $pass):" >&2
+    cat "$AGENT_STDERR" >&2
+  fi
+  rm -f "$AGENT_STDERR"
+
+  NEW_COUNT=$(
+    echo "$OUT" | python3 -c "
+import re, sys
+
+log_path = sys.argv[1]
+tag_re = re.compile(
+    r'^[ \t]*(?:[-*+]\s+|\d+\.\s+)?\[(BLOCKER|WARNING|NIT)\]\s*(.*)'
 )
-STATUS=$?
-if [[ -s "$AGENT_STDERR" ]]; then
-  echo "cursor-review: agent stderr:" >&2
-  cat "$AGENT_STDERR" >&2
-fi
-rm -f "$AGENT_STDERR"
+existing = set()
+try:
+    with open(log_path, encoding='utf-8') as f:
+        for line in f:
+            t = line.strip()
+            if t:
+                existing.add(t)
+except FileNotFoundError:
+    pass
 
-RESULT=$(python3 -c "
+new_lines: list[str] = []
+for raw in sys.stdin.read().splitlines():
+    m = tag_re.match(raw.strip())
+    if not m:
+        continue
+    sev, rest = m.group(1), m.group(2).strip()
+    line = f'[{sev}] {rest}'
+    if line not in existing:
+        existing.add(line)
+        new_lines.append(line)
+
+if new_lines:
+    with open(log_path, 'a', encoding='utf-8') as f:
+        for line in new_lines:
+            f.write(line + '\n')
+print(len(new_lines))
+" "$FINDINGS_LOG"
+  )
+  echo "cursor-review: pass $pass appended ${NEW_COUNT} new finding line(s) → $FINDINGS_LOG" >&2
+
+  RESULT=$(
+    python3 -c "
 import sys, textwrap, re
 
 lines = sys.stdin.read().strip().splitlines()
 
 buckets = {'BLOCKER': [], 'WARNING': [], 'NIT': []}
-# Allow optional list markers / indentation before [SEVERITY]
 tag_re = re.compile(
     r'^[ \t]*(?:[-*+]\s+|\d+\.\s+)?\[(BLOCKER|WARNING|NIT)\]\s*(.*)'
 )
@@ -536,31 +665,56 @@ for key in ('BLOCKER', 'WARNING', 'NIT'):
         counts.append(f'{n} {key.lower()}' + ('s' if n != 1 else ''))
 summary = ', '.join(counts) if counts else 'no issues found'
 
+pass_info = ''
+if int(sys.argv[2]) > 1:
+    pass_info = f' (pass {sys.argv[1]} of {sys.argv[2]})'
+
 sections.append('## Summary')
-sections.append(f'{verdict}: {summary}')
+sections.append(f'{verdict}: {summary}{pass_info}')
 sections.append('')
 sections.append(verdict)
 
 print('\n'.join(sections))
-" <<< "$OUT")
+" "$pass" "$PASSES" <<< "$OUT"
+  )
+done
+
+CUMULATIVE_LINES=0
+if [[ -f "$FINDINGS_LOG" ]]; then
+  CUMULATIVE_LINES=$(wc -l < "$FINDINGS_LOG")
+fi
+echo "cursor-review: cumulative findings log: $FINDINGS_LOG ($CUMULATIVE_LINES line(s))" >&2
+if [[ "$PASSES" -gt 1 ]]; then
+  echo "cursor-review: formatted output below reflects pass $PASSES only; full history is in the log." >&2
+fi
 
 echo
 echo "──────── Cursor AI review ────────"
 echo "$RESULT"
 echo "──────────────────────────────────"
 
-if [[ $STATUS -ne 0 ]]; then
-  echo "cursor-review: agent CLI exited $STATUS — not treating as FAIL."
+if [[ $LAST_STATUS -ne 0 ]]; then
+  echo "cursor-review: agent CLI exited $LAST_STATUS — not treating as FAIL."
   exit 0
 fi
 
 VERDICT=$(echo "$RESULT" | grep -oE '^(PASS|FAIL)$' | tail -1)
-if [[ "$VERDICT" == "FAIL" ]]; then
-  if [[ "${CURSOR_REVIEW_BLOCK:-0}" == "1" ]]; then
-    echo "cursor-review: FAIL — exiting 1 (CURSOR_REVIEW_BLOCK=1)."
-    exit 1
-  fi
-  echo "cursor-review: FAIL — warning only. Set CURSOR_REVIEW_BLOCK=1 to enforce."
+CUMULATIVE_VERDICT="$VERDICT"
+if [[ "$RUN_WAS_FRESH" -ne 1 ]] && [[ "$CUMULATIVE_VERDICT" == "PASS" ]] && [[ -f "$FINDINGS_LOG" ]] && grep -qE '^\[BLOCKER\]' "$FINDINGS_LOG"; then
+  CUMULATIVE_VERDICT=FAIL
+fi
+
+if [[ "${CURSOR_REVIEW_BLOCK:-0}" == "1" ]] && [[ "$VERDICT" == "FAIL" ]]; then
+  echo "cursor-review: FAIL — exiting 1 (CURSOR_REVIEW_BLOCK=1; this pass verdict)." >&2
+  exit 1
+fi
+if [[ "${CURSOR_REVIEW_BLOCK_CUMULATIVE:-0}" == "1" ]] && [[ "$CUMULATIVE_VERDICT" == "FAIL" ]]; then
+  echo "cursor-review: FAIL — exiting 1 (CURSOR_REVIEW_BLOCK_CUMULATIVE=1; stale [BLOCKER] in findings log or this pass FAIL)." >&2
+  exit 1
+fi
+
+if [[ "$CUMULATIVE_VERDICT" == "FAIL" ]] && [[ "$VERDICT" == "PASS" ]]; then
+  echo "cursor-review: note: findings log still contains [BLOCKER] from earlier runs; this pass is PASS. Truncate the log or use --fresh-findings-log." >&2
 fi
 
 exit 0

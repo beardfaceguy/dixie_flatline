@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, ClassVar
 
+from dixie.constants import DEFAULT_GOBUSTER_WORDLIST
 from dixie.tools.base import Tool, ToolParameter
 
 
@@ -24,7 +25,7 @@ class GobusterTool(Tool):
         ToolParameter(
             name="wordlist",
             description="Wordlist to use for brute-forcing",
-            default="/usr/share/wordlists/dirb/common.txt",
+            default=DEFAULT_GOBUSTER_WORDLIST,
         ),
         ToolParameter(
             name="extensions",
@@ -46,7 +47,7 @@ class GobusterTool(Tool):
     def build_command(self, **kwargs: Any) -> list[str]:
         cmd = ["gobuster", "dir", "-u", kwargs["url"]]
 
-        wordlist = kwargs.get("wordlist", "/usr/share/wordlists/dirb/common.txt")
+        wordlist = kwargs.get("wordlist") or DEFAULT_GOBUSTER_WORDLIST
         cmd.extend(["-w", wordlist])
 
         extensions = kwargs.get("extensions")

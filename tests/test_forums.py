@@ -213,6 +213,7 @@ class TestScheduler:
         assert "0 6 * * *" in cron
         assert "dixie intel update" in cron
         assert "test@example.com" in cron
+        assert "dixie-intel-managed" in cron
 
     def test_generate_crontab_with_webhook(self):
         from dixie.intel.scheduler import generate_crontab

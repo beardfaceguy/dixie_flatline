@@ -5,6 +5,7 @@ from pathlib import Path
 
 import yaml
 
+from dixie.constants import DEFAULT_LLM_MODEL
 from dixie.core.config import EngagementConfig, LLMConfig, SandboxConfig
 
 
@@ -12,7 +13,7 @@ class TestEngagementConfig:
     def test_defaults(self):
         config = EngagementConfig(target="192.168.1.1")
         assert config.target == "192.168.1.1"
-        assert config.llm.model == "openai/gpt-4o"
+        assert config.llm.model == DEFAULT_LLM_MODEL
         assert config.sandbox.timeout == 300
         assert config.agent.max_iterations == 50
 
@@ -66,11 +67,39 @@ class TestEngagementConfig:
 
         path.unlink()
 
+    def test_tool_defaults_from_file(self):
+        data = {
+            "target": "10.0.0.1",
+            "tool_defaults": {"gobuster_wordlist": "/custom/rockyou.txt"},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(data, f)
+            path = Path(f.name)
+
+        config = EngagementConfig.from_file(path)
+        assert config.tool_defaults.gobuster_wordlist == "/custom/rockyou.txt"
+
+        path.unlink()
+
+    def test_tool_defaults_masscan_max_rate_from_file(self):
+        data = {
+            "target": "10.0.0.1",
+            "tool_defaults": {"masscan_max_rate": 5000},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            yaml.dump(data, f)
+            path = Path(f.name)
+
+        config = EngagementConfig.from_file(path)
+        assert config.tool_defaults.masscan_max_rate == 5000
+
+        path.unlink()
+
 
 class TestLLMConfig:
     def test_defaults(self):
         config = LLMConfig()
-        assert config.model == "openai/gpt-4o"
+        assert config.model == DEFAULT_LLM_MODEL
         assert config.temperature == 0.2
         assert config.api_base is None
 

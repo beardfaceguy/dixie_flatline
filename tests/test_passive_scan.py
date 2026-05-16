@@ -7,8 +7,15 @@ import pytest
 
 from dixie.core.agent import Agent, _is_subnet
 from dixie.core.recon_policy import RECON_BLOCKED_TOOLS
-from dixie.core.config import EngagementConfig, EngagementMode, SandboxConfig
-from dixie.core.schema import Confidence, EngagementState, Finding, Severity
+from dixie.core.config import (
+    AgentConfig,
+    EngagementConfig,
+    EngagementMode,
+    SandboxConfig,
+    ToolDefaultsConfig,
+)
+from dixie.core.schema import Confidence, EngagementState, Finding, Severity, ToolResult
+from dixie.constants import DEFAULT_MASSCAN_MAX_RATE
 from dixie.tools import build_default_registry
 from dixie.tools.arp_scan import ArpScanTool
 from dixie.tools.enum4linux import Enum4linuxTool
@@ -46,6 +53,12 @@ class TestSubnetDetection:
 
     def test_cidr_24_is_subnet(self):
         assert _is_subnet("192.168.1.0/24")
+
+    def test_ipv6_subnet(self):
+        assert _is_subnet("2001:db8::/64")
+
+    def test_ipv6_slash128_not_subnet(self):
+        assert not _is_subnet("2001:db8::1/128")
 
     def test_cidr_16_is_subnet(self):
         assert _is_subnet("10.0.0.0/16")
@@ -88,6 +101,109 @@ class TestReconModeBlocking:
         assert "report_finding" not in RECON_BLOCKED_TOOLS
 
 
+class TestAgentToolRetries:
+    def test_retries_until_success(self) -> None:
+        config = EngagementConfig(
+            target="192.168.1.1",
+            agent=AgentConfig(max_tool_retries=2, max_iterations=5),
+            sandbox=SandboxConfig(timeout=30),
+        )
+        tools = build_default_registry()
+        sandbox = MagicMock()
+        sandbox.ensure_image.return_value = False
+        sandbox.run_local.side_effect = [
+            ToolResult(
+                tool="nmap_scan",
+                command="nmap",
+                raw_output="",
+                success=False,
+                error="transient",
+            ),
+            ToolResult(
+                tool="nmap_scan",
+                command="nmap",
+                raw_output=(
+                    "Nmap scan report for 192.168.1.1\n"
+                    "22/tcp   open  ssh     OpenSSH 8.9\n"
+                ),
+                success=True,
+                error=None,
+            ),
+        ]
+        calls: dict[str, int] = {"n": 0}
+
+        def chat(prompt: str) -> dict:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {
+                    "content": "scan",
+                    "tool_calls": [{
+                        "id": "1",
+                        "name": "nmap_scan",
+                        "arguments": {"target": "192.168.1.1"},
+                    }],
+                }
+            return {"content": "done", "tool_calls": []}
+
+        llm = MagicMock()
+        llm.chat.side_effect = chat
+        llm.total_tokens = 0
+        llm.total_cost = 0.0
+        llm.submit_tool_result = MagicMock()
+
+        agent = Agent(config=config, llm=llm, tools=tools, sandbox=sandbox)
+        agent.run()
+
+        assert sandbox.run_local.call_count == 2
+
+
+class TestGobusterToolDefaultsMerge:
+    def test_yaml_wordlist_fills_missing(self) -> None:
+        config = EngagementConfig(
+            target="192.168.1.1",
+            tool_defaults=ToolDefaultsConfig(gobuster_wordlist="/engagement/custom.txt"),
+        )
+        tools = build_default_registry()
+        sandbox = MagicMock()
+        sandbox.ensure_image.return_value = False
+        agent = Agent(config=config, llm=MagicMock(), tools=tools, sandbox=sandbox)
+        merged = agent._merge_engagement_tool_defaults("gobuster_dir", {"url": "http://x/"})
+        assert merged["wordlist"] == "/engagement/custom.txt"
+        assert merged["url"] == "http://x/"
+
+    def test_explicit_wordlist_wins(self) -> None:
+        config = EngagementConfig(
+            target="192.168.1.1",
+            tool_defaults=ToolDefaultsConfig(gobuster_wordlist="/yaml/wl.txt"),
+        )
+        tools = build_default_registry()
+        sandbox = MagicMock()
+        sandbox.ensure_image.return_value = False
+        agent = Agent(config=config, llm=MagicMock(), tools=tools, sandbox=sandbox)
+        merged = agent._merge_engagement_tool_defaults(
+            "gobuster_dir",
+            {"url": "http://x/", "wordlist": "/llm/picked.txt"},
+        )
+        assert merged["wordlist"] == "/llm/picked.txt"
+
+    def test_empty_string_wordlist_replaced(self) -> None:
+        config = EngagementConfig(
+            target="192.168.1.1",
+            tool_defaults=ToolDefaultsConfig(gobuster_wordlist="/yaml/wl.txt"),
+        )
+        agent = Agent(
+            config=config,
+            llm=MagicMock(),
+            tools=build_default_registry(),
+            sandbox=MagicMock(),
+        )
+        merged = agent._merge_engagement_tool_defaults(
+            "gobuster_dir",
+            {"url": "http://x/", "wordlist": "  "},
+        )
+        assert merged["wordlist"] == "/yaml/wl.txt"
+
+
 class TestReportFindingTool:
     def test_schema(self):
         tool = ReportFindingTool()
@@ -126,6 +242,60 @@ class TestMasscanTool:
         assert "192.168.1.0/24" in cmd
         assert "80,443" in cmd
         assert "5000" in cmd
+
+    def test_build_command_rate_floor_and_caps_high_rate_to_library_default(self):
+        tool = MasscanTool()
+        hi = tool.build_command(target="10.0.0.0/24", ports="80", rate=1_000_000)
+        assert "--rate" in hi
+        rate_idx = hi.index("--rate") + 1
+        assert hi[rate_idx] == str(DEFAULT_MASSCAN_MAX_RATE)
+
+        hi_cap = tool.build_command(
+            target="10.0.0.0/24",
+            ports="80",
+            rate=1_000_000,
+            _masscan_rate_cap=250_000,
+        )
+        rate_idx2 = hi_cap.index("--rate") + 1
+        assert hi_cap[rate_idx2] == "250000"
+
+        lo = tool.build_command(target="10.0.0.0/24", ports="80", rate=-5)
+        lo_idx = lo.index("--rate") + 1
+        assert lo[lo_idx] == "1"
+
+    def test_extra_args_second_rate_does_not_bypass_cap(self) -> None:
+        tool = MasscanTool()
+        cmd = tool.build_command(
+            target="10.0.0.0/24",
+            ports="80",
+            rate=3000,
+            _masscan_rate_cap=5000,
+            extra_args="--rate 999999",
+        )
+        assert cmd[-2] == "--rate"
+        assert cmd[-1] == "3000"
+
+    def test_extra_args_output_format_does_not_override_json_lines(self) -> None:
+        tool = MasscanTool()
+        cmd = tool.build_command(
+            target="10.0.0.0/24",
+            ports="80",
+            rate=1000,
+            extra_args="--output-format list",
+        )
+        idx = max(i for i, t in enumerate(cmd) if t == "--output-format")
+        assert cmd[idx + 1] == "json"
+
+    def test_build_command_leaves_rate_cap_key_in_kwargs(self) -> None:
+        tool = MasscanTool()
+        args: dict = {
+            "target": "10.0.0.1",
+            "ports": "80",
+            "rate": 3000,
+            "_masscan_rate_cap": 2500,
+        }
+        tool.build_command(**args)
+        assert "_masscan_rate_cap" in args
 
     def test_parse_output(self):
         tool = MasscanTool()
@@ -246,6 +416,12 @@ class TestTestSSLTool:
         result = tool.parse_output(output)
         assert result["issues_count"] == 1
         assert "heartbleed" in result["vulnerabilities"][0]
+
+    def test_parse_output_json_array_indented(self):
+        tool = TestSSLTool()
+        raw = '  [\n    {"id": "weak", "severity": "HIGH", "finding": "weak cipher"}\n  ]\n'
+        result = tool.parse_output(raw)
+        assert result["issues_count"] == 1
 
 
 class TestArpScanTool:

@@ -6,6 +6,7 @@ recent messages from public channels without requiring API credentials.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 
@@ -13,6 +14,8 @@ import httpx
 
 from dixie.intel.collectors.base import Collector
 from dixie.intel.schema import ExploitMaturity, IntelSource, ThreatEntry
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CHANNELS = [
     "zer0daylab",
@@ -42,7 +45,8 @@ class TelegramCollector(Collector):
             try:
                 channel_entries = self._fetch_channel(channel)
                 entries.extend(channel_entries)
-            except Exception:
+            except Exception as e:
+                logger.warning("Telegram collector failed for channel %s: %s", channel, e)
                 continue
         return entries
 

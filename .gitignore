@@ -11,6 +11,7 @@ build/
 .env.*
 !.env.example
 .linear_import_vikunja/
+.cursor-review-findings.log
 
 # Large generated SFT corpora / mirrors (rebuild via data/prepare_pentest_sft.py)
 data/dixie_pentest/

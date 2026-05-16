@@ -88,13 +88,13 @@ def _sample_engagement() -> EngagementState:
         duration_ms=5000,
     ))
     state.add_result(ToolResult(
-        tool="gobuster", command="gobuster dir -u https://192.168.1.10 -w common.txt",
-        raw_output="/admin (Status: 200)\n/static (Status: 200)",
+        tool="gobuster_dir", command="gobuster dir -u https://192.168.1.10 -w common.txt",
+        raw_output="/admin (Status: 200) [Size: 1543]\n/static (Status: 200) [Size: 890]\n",
         timestamp=datetime(2026, 4, 30, 10, 3, 0, tzinfo=timezone.utc),
         duration_ms=12000,
     ))
     state.add_result(ToolResult(
-        tool="nikto", command="nikto -h 192.168.1.10",
+        tool="nikto_scan", command="nikto -h https://192.168.1.10",
         raw_output="+ Server: nginx/1.18.0\n+ /admin/login: SQL Injection possible",
         timestamp=datetime(2026, 4, 30, 10, 5, 0, tzinfo=timezone.utc),
         duration_ms=30000,

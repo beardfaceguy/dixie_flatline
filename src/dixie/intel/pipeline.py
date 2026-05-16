@@ -19,6 +19,8 @@ from dixie.intel.collectors.packetstorm import PacketStormCollector
 from dixie.intel.collectors.reddit import RedditCollector
 from dixie.intel.collectors.sploitus import SploitusCollector
 from dixie.intel.collectors.telegram import TelegramCollector
+from dixie.constants import DEFAULT_TRANSLATION_MODEL
+from dixie.intel.envparse import env_int
 from dixie.intel.schema import FeedStatus
 from dixie.intel.store import IntelStore
 
@@ -44,10 +46,20 @@ def build_collectors(
     collectors: list[Collector] = []
 
     # Tier 1: structured APIs
+    # Tier 1: structured APIs (EIP uses strict cve_published_at; sparse API rows
+    # are expected if the feed omits dates — see ExploitIntelCollector)
     collectors.extend([
         CisaKevCollector(),
-        ExploitIntelCollector(days_back=1),
-        NvdCollector(api_key=nvd_api_key, days_back=1),
+        ExploitIntelCollector(
+            days_back=1,
+            max_pages=env_int("DIXIE_INTEL_EIP_MAX_PAGES", 50),
+        ),
+        NvdCollector(
+            api_key=nvd_api_key,
+            days_back=1,
+            max_api_pages=env_int("DIXIE_INTEL_NVD_MAX_API_PAGES", 500),
+            max_entries=env_int("DIXIE_INTEL_NVD_MAX_ENTRIES", 100_000),
+        ),
         FullDisclosureCollector(),
     ])
 
@@ -55,7 +67,9 @@ def build_collectors(
         collectors.extend([
             SploitusCollector(),
             PacketStormCollector(),
-            ExploitDbCollector(max_entries=200),
+            ExploitDbCollector(
+                max_entries=env_int("DIXIE_INTEL_EXPLOITDB_MAX", 200),
+            ),
         ])
 
     if tier >= 3:
@@ -76,7 +90,7 @@ def run_pipeline(
     use_tor: bool = False,
     onion_urls: dict[str, str] | None = None,
     translate: bool = False,
-    translate_model: str = "openai/gpt-4o-mini",
+    translate_model: str = DEFAULT_TRANSLATION_MODEL,
 ) -> tuple[IntelStore, list[FeedStatus]]:
     """Run all collectors and return the store + feed statuses."""
     store = IntelStore(db_path)

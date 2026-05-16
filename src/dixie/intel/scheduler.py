@@ -5,8 +5,8 @@ Generates crontab entries and produces alert digests for critical findings.
 
 from __future__ import annotations
 
-import json
 import logging
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -18,7 +18,55 @@ from dixie.intel.store import IntelStore
 logger = logging.getLogger(__name__)
 
 CRON_COMMENT = "# dixie-flatline threat intel"
-DIXIE_BIN = sys.executable.replace("python3", "dixie").replace("python", "dixie")
+# Suffix on managed lines so install strips prior blocks even when log path env changes.
+CRON_TAG = "# dixie-intel-managed"
+
+
+def _intel_tier_schedule_rows(
+    base_cmd: str,
+    alert_cmd: str,
+    logf: str,
+) -> list[tuple[str, str]]:
+    return [
+        (
+            "# Tier 1: structured APIs every 2 hours",
+            f"0 */2 * * * {base_cmd} --tier 1 >> {logf} 2>&1",
+        ),
+        (
+            "# Tier 2: exploit feeds every 6 hours",
+            f"0 */6 * * * {base_cmd} --tier 2 >> {logf} 2>&1",
+        ),
+        (
+            "# Tier 3: social/OSINT daily at 6am UTC",
+            f"0 6 * * * {base_cmd} --tier 3 >> {logf} 2>&1",
+        ),
+        (
+            "# Check for critical alerts every 2 hours",
+            f"15 */2 * * * {alert_cmd} >> {logf} 2>&1",
+        ),
+    ]
+
+
+def _tag_managed_line(line: str) -> str:
+    return f"{line.rstrip()} {CRON_TAG}"
+
+
+def _managed_dixie_intel_log_path() -> str:
+    """Log path embedded in generator/install crontab lines Dixie owns and replaces.
+
+    Set ``DIXIE_INTEL_CRON_LOG_PATH`` when ``/var/log`` is not writable.
+    """
+    return (
+        os.environ.get("DIXIE_INTEL_CRON_LOG_PATH", "").strip()
+        or "/var/log/dixie-intel.log"
+    )
+
+
+def _dixie_cli_invocation() -> str:
+    override = (os.environ.get("DIXIE_CRON_CLI") or "").strip()
+    if override:
+        return override
+    return f"{sys.executable} -m dixie"
 
 
 def generate_crontab(
@@ -37,33 +85,42 @@ def generate_crontab(
     from dixie.intel.pipeline import DEFAULT_DB
 
     db = db_path or DEFAULT_DB
-    base_cmd = f"{DIXIE_BIN} intel update --db {db}"
+    dixie_bin = _dixie_cli_invocation()
+    base_cmd = f"{dixie_bin} intel update --db {db}"
     if nvd_key:
         base_cmd += f" --nvd-key {nvd_key}"
 
-    alert_cmd = f"{DIXIE_BIN} intel alert --db {db}"
+    alert_cmd = f"{dixie_bin} intel alert --db {db}"
     if alert_email:
         alert_cmd += f" --email {alert_email}"
     if alert_webhook:
         alert_cmd += f" --webhook {alert_webhook}"
 
-    lines = [
-        CRON_COMMENT,
-        f"# Tier 1: structured APIs every 2 hours",
-        f"0 */2 * * * {base_cmd} --tier 1 >> /var/log/dixie-intel.log 2>&1",
-        f"# Tier 2: exploit feeds every 6 hours",
-        f"0 */6 * * * {base_cmd} --tier 2 >> /var/log/dixie-intel.log 2>&1",
-        f"# Tier 3: social/OSINT daily at 6am UTC",
-        f"0 6 * * * {base_cmd} --tier 3 >> /var/log/dixie-intel.log 2>&1",
-        f"# Check for critical alerts every 2 hours",
-        f"15 */2 * * * {alert_cmd} >> /var/log/dixie-intel.log 2>&1",
-    ]
+    logf = _managed_dixie_intel_log_path()
+    lines = [_tag_managed_line(CRON_COMMENT)]
+    for comment, schedule in _intel_tier_schedule_rows(base_cmd, alert_cmd, logf):
+        lines.append(_tag_managed_line(comment))
+        lines.append(_tag_managed_line(schedule))
 
     return "\n".join(lines) + "\n"
 
 
+def _is_managed_intel_cron_line(line: str) -> bool:
+    """True only for Dixie-managed markers (tagged lines or legacy header)."""
+    if CRON_TAG in line:
+        return True
+    return line.strip() == CRON_COMMENT
+
+
 def install_crontab(cron_entries: str) -> bool:
-    """Install crontab entries, preserving existing non-dixie entries."""
+    """Install crontab entries, preserving existing non-dixie entries.
+
+    Removes only lines that include ``CRON_TAG`` (current generator output) or
+    are exactly the legacy ``CRON_COMMENT`` header line. Other comments or
+    custom ``dixie intel`` jobs are left untouched. Crontab rows from older
+    Dixie builds without ``CRON_TAG`` may need a one-time manual delete before
+    reinstalling to avoid duplicate schedules.
+    """
     try:
         result = subprocess.run(
             ["crontab", "-l"], capture_output=True, text=True
@@ -73,10 +130,8 @@ def install_crontab(cron_entries: str) -> bool:
         logger.error("crontab command not found")
         return False
 
-    # Remove old dixie entries
     filtered = [
-        line for line in existing.splitlines()
-        if CRON_COMMENT not in line and "dixie intel" not in line
+        line for line in existing.splitlines() if not _is_managed_intel_cron_line(line)
     ]
 
     new_crontab = "\n".join(filtered).strip() + "\n\n" + cron_entries

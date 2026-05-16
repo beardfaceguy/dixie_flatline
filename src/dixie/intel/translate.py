@@ -11,6 +11,8 @@ import logging
 import os
 import re
 
+from dixie.constants import DEFAULT_TRANSLATION_MODEL
+from dixie.intel.envparse import env_int
 from dixie.intel.schema import ThreatEntry
 from dixie.intel.store import IntelStore
 
@@ -35,7 +37,7 @@ LANG_NAMES = {
 }
 
 
-def translate_entry(entry: ThreatEntry, model: str = "openai/gpt-4o-mini") -> ThreatEntry:
+def translate_entry(entry: ThreatEntry, model: str = DEFAULT_TRANSLATION_MODEL) -> ThreatEntry:
     """Translate a non-English entry's title and description to English.
 
     Stores the original text in raw_text. Returns the entry unchanged if
@@ -67,7 +69,7 @@ def translate_entry(entry: ThreatEntry, model: str = "openai/gpt-4o-mini") -> Th
 
 def translate_batch(
     entries: list[ThreatEntry],
-    model: str = "openai/gpt-4o-mini",
+    model: str = DEFAULT_TRANSLATION_MODEL,
 ) -> list[ThreatEntry]:
     """Translate a batch of non-English entries."""
     if not _has_api_key():
@@ -87,8 +89,8 @@ def translate_batch(
 
 def translate_pending(
     store: IntelStore,
-    model: str = "openai/gpt-4o-mini",
-    limit: int = 50,
+    model: str = DEFAULT_TRANSLATION_MODEL,
+    limit: int | None = None,
 ) -> int:
     """Translate entries in the store that haven't been translated yet.
 
@@ -100,12 +102,14 @@ def translate_pending(
         logger.info("No LLM API key found, skipping translation")
         return 0
 
+    eff_limit = limit if limit is not None else env_int("DIXIE_INTEL_TRANSLATE_LIMIT", 50)
+
     rows = store._conn.execute(
         """SELECT * FROM threat_entries
         WHERE language != 'en' AND raw_text IS NULL
         ORDER BY first_seen DESC
         LIMIT ?""",
-        (limit,),
+        (eff_limit,),
     ).fetchall()
 
     if not rows:

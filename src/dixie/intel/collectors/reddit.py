@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timezone
 
 import httpx
 
 from dixie.intel.collectors.base import Collector
+from dixie.intel.envparse import env_int
 from dixie.intel.schema import ExploitMaturity, IntelSource, ThreatEntry
+
+logger = logging.getLogger(__name__)
 
 SUBREDDITS = ["netsec", "exploitdev", "ReverseEngineering"]
 HEADERS = {
@@ -21,9 +25,19 @@ class RedditCollector(Collector):
     source = IntelSource.REDDIT
     name = "Reddit Security Subs"
 
-    def __init__(self, subreddits: list[str] | None = None, limit: int = 50) -> None:
+    def __init__(
+        self,
+        subreddits: list[str] | None = None,
+        limit: int = 50,
+        min_score: int | None = None,
+    ) -> None:
         self.subreddits = subreddits or SUBREDDITS
         self.limit = limit
+        self.min_score = (
+            min_score
+            if min_score is not None
+            else env_int("DIXIE_INTEL_REDDIT_MIN_SCORE", 2)
+        )
 
     def fetch(self) -> list[ThreatEntry]:
         entries = []
@@ -32,7 +46,8 @@ class RedditCollector(Collector):
             try:
                 sub_entries = self._fetch_subreddit(sub)
                 entries.extend(sub_entries)
-            except Exception:
+            except Exception as e:
+                logger.warning("Reddit collector failed for r/%s: %s", sub, e)
                 continue
 
         return entries
@@ -84,7 +99,7 @@ class RedditCollector(Collector):
             created = post.get("created_utc", 0)
             score = post.get("score", 0)
 
-            if score < 2:
+            if score < self.min_score:
                 continue
 
             cve_match = re.search(r"CVE-\d{4}-\d+", title + " " + selftext)

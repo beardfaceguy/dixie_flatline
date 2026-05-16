@@ -6,6 +6,7 @@ import json
 import re
 from typing import Any
 
+from dixie.constants import DEFAULT_MASSCAN_MAX_RATE
 from dixie.tools.base import Tool, ToolParameter
 
 
@@ -29,7 +30,7 @@ class MasscanTool(Tool):
         ),
         ToolParameter(
             name="rate",
-            description="Packets per second (default 1000, max 10000 for safe scanning)",
+            description="Packets per second (default 1000); scope safely to your authorization.",
             type="number",
             default=1000,
         ),
@@ -40,17 +41,30 @@ class MasscanTool(Tool):
     ]
 
     def build_command(self, **kwargs: Any) -> list[str]:
-        cmd = ["masscan", "--output-format", "json", "--output-filename", "-"]
-
-        cmd.append(kwargs["target"])
-        cmd.extend(["-p", kwargs["ports"]])
-
-        rate = kwargs.get("rate", 1000)
-        cmd.extend(["--rate", str(int(rate))])
+        cmd = ["masscan"]
 
         extra = kwargs.get("extra_args")
         if extra:
             cmd.extend(extra.split())
+
+        # Emit output settings, target, ports, then capped --rate last so extras
+        # cannot override JSON line mode or the enforced rate (masscan: last wins).
+        cmd.extend(["--output-format", "json", "--output-filename", "-"])
+        cmd.append(kwargs["target"])
+        cmd.extend(["-p", kwargs["ports"]])
+
+        cap_raw = kwargs.get("_masscan_rate_cap")
+        try:
+            cap = int(cap_raw) if cap_raw is not None else DEFAULT_MASSCAN_MAX_RATE
+        except (TypeError, ValueError):
+            cap = DEFAULT_MASSCAN_MAX_RATE
+
+        try:
+            r = int(kwargs.get("rate", 1000))
+        except (TypeError, ValueError):
+            r = 1000
+        rate = max(1, min(r, cap))
+        cmd.extend(["--rate", str(rate)])
 
         return cmd
 

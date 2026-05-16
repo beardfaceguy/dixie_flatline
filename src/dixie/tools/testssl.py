@@ -62,22 +62,37 @@ class TestSSLTool(Tool):
         protocols: list[dict[str, Any]] = []
 
         for line in raw_output.splitlines():
-            line = line.strip()
-            if not line:
+            trimmed = line.strip()
+            if not trimmed:
                 continue
             try:
-                entry = json.loads(line)
+                entry = json.loads(trimmed)
             except json.JSONDecodeError:
-                if line.startswith("["):
+                if trimmed.lstrip().startswith("["):
                     try:
-                        entries = json.loads(raw_output)
-                        for e in entries:
-                            self._process_entry(e, findings, vulnerabilities, protocols)
-                        break
+                        parsed = json.loads(trimmed.lstrip())
+                        if isinstance(parsed, list):
+                            for e in parsed:
+                                if isinstance(e, dict):
+                                    self._process_entry(e, findings, vulnerabilities, protocols)
                     except json.JSONDecodeError:
                         pass
                 continue
-            self._process_entry(entry, findings, vulnerabilities, protocols)
+            else:
+                if isinstance(entry, dict):
+                    self._process_entry(entry, findings, vulnerabilities, protocols)
+
+        if not findings and not vulnerabilities and not protocols:
+            blob_start = raw_output.find("[")
+            if blob_start >= 0:
+                try:
+                    arr = json.loads(raw_output[blob_start:])
+                    if isinstance(arr, list):
+                        for e in arr:
+                            if isinstance(e, dict):
+                                self._process_entry(e, findings, vulnerabilities, protocols)
+                except json.JSONDecodeError:
+                    pass
 
         return {
             "findings": findings,

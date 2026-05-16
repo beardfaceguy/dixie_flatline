@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import click
 from rich.console import Console
 from rich.logging import RichHandler
 
+from dixie.constants import DEFAULT_TRANSLATION_MODEL
 from dixie.core.agent import Agent
 from dixie.core.config import EngagementConfig, EngagementMode
 from dixie.core.sandbox import Sandbox
@@ -132,7 +134,7 @@ def report_generate(
 def report_mitre(engagement_json: Path) -> None:
     """Show MITRE ATT&CK technique coverage from an engagement."""
     from dixie.core.schema import EngagementState
-    from dixie.reporting.mitre import get_technique, TACTICS, tactics_for_technique
+    from dixie.reporting.mitre import get_technique, TACTICS
 
     state = EngagementState.model_validate_json(engagement_json.read_text())
 
@@ -173,7 +175,19 @@ def intel() -> None:
 @click.option("--tier", type=click.IntRange(1, 3), default=3, help="Collector tier (1=APIs, 2=+feeds, 3=+social)")
 @click.option("--tor", is_flag=True, help="Route Tier 3 forum requests through Tor")
 @click.option("--translate", is_flag=True, help="Translate non-English entries via LLM")
-def update(db: Path | None, nvd_key: str | None, tier: int, tor: bool, translate: bool) -> None:
+@click.option(
+    "--translate-model",
+    default=None,
+    help="LiteLLM model for --translate (else DIXIE_INTEL_TRANSLATE_MODEL or default)",
+)
+def update(
+    db: Path | None,
+    nvd_key: str | None,
+    tier: int,
+    tor: bool,
+    translate: bool,
+    translate_model: str | None,
+) -> None:
     """Run threat intelligence collectors.
 
     Tier 1: Structured APIs (CISA KEV, NVD, EIP, Full Disclosure)
@@ -184,9 +198,11 @@ def update(db: Path | None, nvd_key: str | None, tier: int, tor: bool, translate
 
     db_path = db or DEFAULT_DB
     console.print(f"[bold]Updating threat intelligence (tier {tier})...[/bold]")
+    tw_model = translate_model or os.environ.get("DIXIE_INTEL_TRANSLATE_MODEL")
     store, statuses = run_pipeline(
         db_path=db_path, tier=tier, nvd_api_key=nvd_key,
         use_tor=tor, translate=translate,
+        translate_model=tw_model or DEFAULT_TRANSLATION_MODEL,
     )
     print_digest(store, statuses)
     store.close()
@@ -293,7 +309,7 @@ def alert(db: Path | None, hours: int, email: str | None, webhook: str | None) -
 
 @intel.command()
 @click.option("--db", type=click.Path(path_type=Path), default=None, help="Database path")
-@click.option("--model", default="openai/gpt-4o-mini", help="LLM model for translation")
+@click.option("--model", default=DEFAULT_TRANSLATION_MODEL, help="LLM model for translation")
 @click.option("--limit", type=int, default=50, help="Max entries to translate per run")
 def translate(db: Path | None, model: str, limit: int) -> None:
     """Translate non-English entries in the intelligence database."""

@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 import litellm
+from litellm.exceptions import APIError
 
 from dixie.core.config import EngagementMode, LLMConfig
 from dixie.tools.base import ToolRegistry
@@ -83,6 +84,39 @@ def get_system_prompt(mode: EngagementMode = EngagementMode.FULL) -> str:
 SYSTEM_PROMPT_RECON = _format_recon_system_prompt()
 
 
+def _dump_tool_call_for_message(tc: Any) -> dict[str, Any]:
+    """Serialize a provider tool-call object for ``messages`` (OpenAI-style)."""
+    md = getattr(tc, "model_dump", None)
+    if callable(md):
+        try:
+            return md()
+        except (TypeError, ValueError):
+            logger.warning(
+                "tool_call model_dump failed for id=%s",
+                getattr(tc, "id", ""),
+                exc_info=True,
+            )
+    fn = getattr(tc, "function", None)
+    if fn is None:
+        logger.warning(
+            "tool_call missing .function; using stub (id=%s)",
+            getattr(tc, "id", ""),
+        )
+        return {
+            "id": getattr(tc, "id", ""),
+            "type": getattr(tc, "type", None) or "function",
+            "function": {"name": "unknown", "arguments": "{}"},
+        }
+    args = getattr(fn, "arguments", None) or "{}"
+    if not isinstance(args, str):
+        args = json.dumps(args)
+    return {
+        "id": getattr(tc, "id", ""),
+        "type": getattr(tc, "type", None) or "function",
+        "function": {"name": getattr(fn, "name", None) or "unknown", "arguments": args},
+    }
+
+
 class LLMClient:
     """Wraps LiteLLM for multi-provider model access with tool calling."""
 
@@ -102,34 +136,68 @@ class LLMClient:
         self.total_tokens = 0
         self.total_cost = 0.0
 
-        if config.api_base:
-            litellm.api_base = config.api_base
-
     def reset(self) -> None:
         self.messages = [{"role": "system", "content": self._system_prompt}]
 
-    def chat(self, user_message: str) -> dict:
+    def chat(self, user_message: str) -> dict[str, Any]:
         """Send a message and get a response, potentially with tool calls.
 
         Returns a dict with keys:
         - content: str | None (text response)
         - tool_calls: list[dict] (tool invocations requested by the model)
-        - raw: the full response object
+        - tool_json_error: optional str when the model sent tool_calls but every payload was invalid
+        - error: optional str when the provider call fails (no assistant message stored)
         """
         self.messages.append({"role": "user", "content": user_message})
 
-        response = litellm.completion(
-            model=self.config.model,
-            messages=self.messages,
-            tools=self.tool_registry.tool_schemas(),
-            temperature=self.config.temperature,
-            max_tokens=self.config.max_tokens,
-        )
+        completion_kw: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": self.messages,
+            "tools": self.tool_registry.tool_schemas(),
+            "temperature": self.config.temperature,
+            "max_tokens": self.config.max_tokens,
+        }
+        if self.config.api_base:
+            completion_kw["api_base"] = self.config.api_base
+
+        try:
+            response = litellm.completion(**completion_kw)
+        except APIError as e:
+            logger.warning(
+                "LiteLLM provider error for model=%s",
+                self.config.model,
+                exc_info=True,
+            )
+            self.messages.pop()
+            return {
+                "content": None,
+                "tool_calls": [],
+                "error": f"{type(e).__name__}: {e}",
+            }
+        except Exception as e:
+            logger.warning(
+                "Unexpected LiteLLM completion failure for model=%s",
+                self.config.model,
+                exc_info=True,
+            )
+            self.messages.pop()
+            return {
+                "content": None,
+                "tool_calls": [],
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+        if not response.choices:
+            logger.warning("LiteLLM returned empty choices for model=%s", self.config.model)
+            self.messages.pop()
+            return {
+                "content": None,
+                "tool_calls": [],
+                "error": "empty choices from provider",
+            }
 
         choice = response.choices[0]
         assistant_msg = choice.message
-
-        self.messages.append(assistant_msg.model_dump())
 
         usage = response.usage
         if usage:
@@ -142,19 +210,79 @@ class LLMClient:
         except Exception:
             logger.debug("completion_cost failed for model=%s", self.config.model, exc_info=True)
 
-        tool_calls = []
+        tool_calls: list[dict[str, Any]] = []
+        valid_raw_tool_calls: list[Any] = []
         if assistant_msg.tool_calls:
             for tc in assistant_msg.tool_calls:
+                fn = getattr(tc, "function", None)
+                if fn is None:
+                    logger.warning(
+                        "Tool call from model missing .function (skipping): id=%s",
+                        getattr(tc, "id", ""),
+                    )
+                    continue
+                raw_args = getattr(fn, "arguments", None)
+                if isinstance(raw_args, dict):
+                    args = raw_args
+                else:
+                    raw_s = "{}" if raw_args in (None, "") else None
+                    if raw_s is None:
+                        if isinstance(raw_args, str):
+                            raw_s = raw_args
+                        else:
+                            try:
+                                raw_s = json.dumps(raw_args)
+                            except (TypeError, ValueError):
+                                logger.warning(
+                                    "Tool arguments for %s are not a string, dict, or JSON-serializable "
+                                    "(omitting tool call): %s",
+                                    getattr(fn, "name", "unknown"),
+                                    type(raw_args).__name__,
+                                )
+                                continue
+                    try:
+                        args = json.loads(raw_s)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "Invalid tool JSON from model for %s (omitting tool call): %s",
+                            getattr(fn, "name", "unknown"),
+                            raw_s[:200],
+                        )
+                        continue
+                if not isinstance(args, dict):
+                    logger.warning(
+                        "Tool arguments must be a JSON object for %s, got %s",
+                        getattr(fn, "name", "unknown"),
+                        type(args).__name__,
+                    )
+                    continue
                 tool_calls.append({
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "arguments": json.loads(tc.function.arguments),
+                    "id": getattr(tc, "id", ""),
+                    "name": getattr(fn, "name", "unknown"),
+                    "arguments": args,
                 })
+                valid_raw_tool_calls.append(tc)
 
-        return {
+        assistant_dump = assistant_msg.model_dump()
+        if assistant_msg.tool_calls:
+            if valid_raw_tool_calls:
+                assistant_dump["tool_calls"] = [
+                    _dump_tool_call_for_message(tc) for tc in valid_raw_tool_calls
+                ]
+            else:
+                assistant_dump["tool_calls"] = []
+
+        self.messages.append(assistant_dump)
+
+        result_payload: dict[str, Any] = {
             "content": assistant_msg.content,
             "tool_calls": tool_calls,
         }
+        if assistant_msg.tool_calls and not tool_calls:
+            result_payload["tool_json_error"] = (
+                "Model emitted tool calls but none had valid JSON object arguments."
+            )
+        return result_payload
 
     def submit_tool_result(self, tool_call_id: str, result: str) -> None:
         """Add a tool result to the conversation history."""

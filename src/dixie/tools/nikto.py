@@ -43,7 +43,8 @@ class NiktoTool(Tool):
     ]
 
     def build_command(self, **kwargs: Any) -> list[str]:
-        cmd = ["nikto", "-h", kwargs["target"], "-Format", "csv"]
+        # Plain text (+ OSVDB / + header lines) so parse_output matches real runs.
+        cmd = ["nikto", "-h", kwargs["target"]]
 
         port = kwargs.get("port", 80)
         cmd.extend(["-p", str(port)])
@@ -75,7 +76,19 @@ class NiktoTool(Tool):
             if osvdb_match:
                 vulnerabilities.append({
                     "id": osvdb_match.group(1),
+                    "method": "",
+                    "path": "",
                     "description": osvdb_match.group(2),
+                })
+                continue
+
+            plain_plus = re.match(r"\+\s+(.+?):\s+(.+)", line)
+            if plain_plus:
+                vulnerabilities.append({
+                    "id": "",
+                    "method": "",
+                    "path": plain_plus.group(1).strip(),
+                    "description": plain_plus.group(2).strip(),
                 })
 
         return {

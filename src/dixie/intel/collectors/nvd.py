@@ -6,6 +6,7 @@ the last successful run.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -15,55 +16,117 @@ from dixie.intel.schema import ExploitMaturity, IntelSource, ThreatEntry
 
 NVD_API = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
+logger = logging.getLogger(__name__)
+
+
+def _nvd_total_results(data: dict) -> int:
+    raw = data.get("totalResults", 0)
+    if raw is None:
+        return 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
 
 class NvdCollector(Collector):
     source = IntelSource.NVD
     name = "NVD CVE API"
 
-    def __init__(self, api_key: str | None = None, days_back: int = 1) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        days_back: int = 1,
+        *,
+        max_api_pages: int = 500,
+        max_entries: int = 100_000,
+    ) -> None:
         self.api_key = api_key
         self.days_back = days_back
+        self.max_api_pages = max_api_pages
+        self.max_entries = max_entries
 
     def fetch(self) -> list[ThreatEntry]:
         since = datetime.now(timezone.utc) - timedelta(days=self.days_back)
-        params: dict = {
+        end = datetime.now(timezone.utc)
+        base_params: dict = {
             "lastModStartDate": since.strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
-            "lastModEndDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
+            "lastModEndDate": end.strftime("%Y-%m-%dT%H:%M:%S.000+00:00"),
             "resultsPerPage": 200,
         }
-        headers = {}
+        headers: dict = {}
         if self.api_key:
             headers["apiKey"] = self.api_key
 
-        resp = httpx.get(NVD_API, params=params, headers=headers, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+        entries: list[ThreatEntry] = []
+        start_index = 0
+        pages_fetched = 0
+        total = 0
 
-        entries = []
-        for item in data.get("vulnerabilities", []):
-            cve = item.get("cve", {})
-            cve_id = cve.get("id", "")
-            if not cve_id:
-                continue
+        while True:
+            if len(entries) >= self.max_entries:
+                logger.warning(
+                    "NVD collector hit max_entries cap (%d); stopping with partial result",
+                    self.max_entries,
+                )
+                break
+            if pages_fetched >= self.max_api_pages:
+                if pages_fetched > 0 and start_index < total:
+                    logger.warning(
+                        "NVD collector hit max_api_pages cap (%d); "
+                        "more CVE batches may exist on the API",
+                        self.max_api_pages,
+                    )
+                break
 
-            descriptions = cve.get("descriptions", [])
-            desc = next((d["value"] for d in descriptions if d.get("lang") == "en"), "")
+            params = dict(base_params)
+            params["startIndex"] = start_index
+            resp = httpx.get(NVD_API, params=params, headers=headers, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+            vulns = data.get("vulnerabilities", [])
+            total = _nvd_total_results(data)
 
-            cvss = _extract_cvss(cve.get("metrics", {}))
+            for item in vulns:
+                if len(entries) >= self.max_entries:
+                    break
+                cve = item.get("cve", {})
+                cve_id = cve.get("id", "")
+                if not cve_id:
+                    continue
 
-            entries.append(ThreatEntry(
-                id=f"nvd:{cve_id}",
-                cve_id=cve_id,
-                title=cve_id,
-                description=desc,
-                severity=cvss,
-                exploit_maturity=ExploitMaturity.RUMORED,
-                source=IntelSource.NVD,
-                source_url=f"https://nvd.nist.gov/vuln/detail/{cve_id}",
-                first_seen=_parse_iso(cve.get("published")),
-                last_updated=_parse_iso(cve.get("lastModified")),
-                tags=_extract_cwes(cve.get("weaknesses", [])),
-            ))
+                descriptions = cve.get("descriptions", [])
+                desc = next((d["value"] for d in descriptions if d.get("lang") == "en"), "")
+
+                cvss = _extract_cvss(cve.get("metrics", {}))
+
+                entries.append(ThreatEntry(
+                    id=f"nvd:{cve_id}",
+                    cve_id=cve_id,
+                    title=cve_id,
+                    description=desc,
+                    severity=cvss,
+                    exploit_maturity=ExploitMaturity.RUMORED,
+                    source=IntelSource.NVD,
+                    source_url=f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+                    first_seen=_parse_iso(cve.get("published")),
+                    last_updated=_parse_iso(cve.get("lastModified")),
+                    tags=_extract_cwes(cve.get("weaknesses", [])),
+                ))
+
+            start_index += len(vulns)
+            pages_fetched += 1
+
+            if len(entries) >= self.max_entries:
+                logger.warning(
+                    "NVD collector hit max_entries cap (%d); stopping with partial result",
+                    self.max_entries,
+                )
+                break
+            if not vulns:
+                break
+            if total > 0 and start_index >= total:
+                break
 
         return entries
 

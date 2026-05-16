@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import xml.etree.ElementTree as ET
 from typing import Any
 
 from dixie.tools.base import Tool, ToolParameter
@@ -41,7 +42,8 @@ class NmapTool(Tool):
     ]
 
     def build_command(self, **kwargs: Any) -> list[str]:
-        cmd = ["nmap", "-oX", "-"]  # XML output to stdout for parsing
+        # XML to stdout for stable parsing; greppable fallback still accepts old text logs.
+        cmd = ["nmap", "-oX", "-"]
 
         scan_type = kwargs.get("scan_type", "syn")
         scan_flags = {
@@ -70,10 +72,92 @@ class NmapTool(Tool):
         return cmd
 
     def parse_output(self, raw_output: str) -> dict:
-        """Parse nmap output into structured results.
+        stripped = raw_output.strip()
+        if stripped.startswith("<?xml") or stripped.lstrip().startswith("<nmaprun"):
+            try:
+                return self._parse_xml_output(stripped)
+            except ET.ParseError:
+                pass
+        return self._parse_greppable_output(raw_output)
 
-        Handles both XML (-oX) and normal text output.
-        """
+    def _parse_xml_output(self, xml_text: str) -> dict:
+        # Local nmap XML only; stdlib ElementTree does not expand external entities.
+        root = ET.fromstring(xml_text)
+        hosts: list[dict[str, Any]] = []
+
+        for host_el in root.findall("host"):
+            status_el = host_el.find("status")
+            if status_el is not None and status_el.get("state") == "down":
+                continue
+
+            ip = ""
+            addrs = host_el.findall("address")
+            for a in addrs:
+                if a.get("addrtype") == "ipv4":
+                    ip = a.get("addr") or ""
+                    break
+            if not ip:
+                for a in addrs:
+                    if a.get("addrtype") == "ipv6":
+                        ip = a.get("addr") or ""
+                        break
+
+            hostname = ""
+            hn_wrap = host_el.find("hostnames")
+            if hn_wrap is not None:
+                hn = hn_wrap.find("hostname")
+                if hn is not None:
+                    hostname = hn.get("name") or ""
+
+            display_host = hostname or ip or "unknown"
+            if not ip and hostname:
+                ip = hostname
+
+            current_ports: list[dict[str, Any]] = []
+            ports_el = host_el.find("ports")
+            if ports_el is not None:
+                for port_el in ports_el.findall("port"):
+                    portid = port_el.get("portid", "0")
+                    protocol = port_el.get("protocol", "tcp")
+                    state_el = port_el.find("state")
+                    state = state_el.get("state", "unknown") if state_el is not None else "unknown"
+                    service_el = port_el.find("service")
+                    svc_name = "unknown"
+                    version = ""
+                    if service_el is not None:
+                        svc_name = service_el.get("name") or "unknown"
+                        parts = [
+                            service_el.get(k) or ""
+                            for k in ("product", "version", "extrainfo")
+                        ]
+                        version = " ".join(p for p in parts if p).strip()
+                    try:
+                        port_num = int(portid)
+                    except ValueError:
+                        port_num = 0
+                    current_ports.append({
+                        "port": port_num,
+                        "protocol": protocol,
+                        "state": state,
+                        "service": svc_name,
+                        "version": version,
+                    })
+
+            hosts.append({
+                "hostname": display_host,
+                "ip": ip or display_host,
+                "ports": current_ports,
+            })
+
+        return {
+            "hosts": hosts,
+            "open_ports": sum(
+                len([p for p in h.get("ports", []) if p["state"] == "open"]) for h in hosts
+            ),
+        }
+
+    def _parse_greppable_output(self, raw_output: str) -> dict:
+        """Parse traditional greppable nmap stdout (legacy / manual runs)."""
         hosts = []
         current_host: dict[str, Any] | None = None
         current_ports: list[dict] = []

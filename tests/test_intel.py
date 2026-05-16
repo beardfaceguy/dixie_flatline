@@ -1,8 +1,12 @@
 """Tests for threat intelligence store and schema."""
 
+import logging
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from dixie.intel.schema import ExploitMaturity, FeedStatus, IntelSource, ThreatEntry
 from dixie.intel.store import IntelStore
@@ -131,6 +135,244 @@ class TestIntelStore:
 
         critical = self.store.get_critical_recent(hours=24)
         assert len(critical) >= 1
+
+
+class TestSchedulerCronInvocation:
+    def test_generate_crontab_uses_python_module_not_bare_dixie(self) -> None:
+        import sys
+
+        from dixie.intel.scheduler import generate_crontab
+
+        cron = generate_crontab()
+        assert "-m dixie" in cron
+        assert sys.executable in cron
+        assert "dixie-intel-managed" in cron
+
+    @patch("dixie.intel.scheduler.subprocess")
+    def test_install_crontab_strips_tagged_lines_even_if_log_path_differs(
+        self,
+        mock_subprocess: MagicMock,
+    ) -> None:
+        from dixie.intel.scheduler import CRON_TAG, generate_crontab, install_crontab
+
+        legacy = (
+            "0 */2 * * * /x/python -m dixie intel update --db /data/x.sqlite "
+            f"--tier 1 >> /var/log/legacy-dixie.log 2>&1 {CRON_TAG}\n"
+        )
+        mock_subprocess.run.side_effect = [
+            MagicMock(returncode=0, stdout=f"# keep\n0 * * * * /bin/true\n{legacy}"),
+            MagicMock(returncode=0, stdout="", stderr=""),
+        ]
+        assert install_crontab(generate_crontab()) is True
+        written = mock_subprocess.run.call_args_list[1].kwargs["input"]
+        assert "legacy-dixie.log" not in written
+        assert "dixie-intel-managed" in written
+
+    @patch("dixie.intel.scheduler.subprocess")
+    def test_install_crontab_preserves_untagged_dixie_intel_lines(
+        self,
+        mock_subprocess: MagicMock,
+    ) -> None:
+        from dixie.intel.scheduler import generate_crontab, install_crontab
+
+        custom = (
+            "0 0 * * * python -m dixie intel update --db /custom/db.sqlite "
+            "--tier 1 >> /tmp/operator.log 2>&1\n"
+        )
+        mock_subprocess.run.side_effect = [
+            MagicMock(returncode=0, stdout=custom),
+            MagicMock(returncode=0, stdout="", stderr=""),
+        ]
+        assert install_crontab(generate_crontab()) is True
+        written = mock_subprocess.run.call_args_list[1].kwargs["input"]
+        assert "/custom/db.sqlite" in written
+        assert "dixie-intel-managed" in written
+
+    @patch("dixie.intel.scheduler.subprocess")
+    def test_install_crontab_preserves_similar_header_comments(
+        self,
+        mock_subprocess: MagicMock,
+    ) -> None:
+        from dixie.intel.scheduler import generate_crontab, install_crontab
+
+        note = "# dixie-flatline threat intel — operator notes\n"
+        mock_subprocess.run.side_effect = [
+            MagicMock(returncode=0, stdout=note),
+            MagicMock(returncode=0, stdout="", stderr=""),
+        ]
+        assert install_crontab(generate_crontab()) is True
+        written = mock_subprocess.run.call_args_list[1].kwargs["input"]
+        assert "operator notes" in written
+
+    def test_generate_crontab_log_path_env_override(self, monkeypatch) -> None:
+        from dixie.intel.scheduler import generate_crontab
+
+        monkeypatch.setenv("DIXIE_INTEL_CRON_LOG_PATH", "/tmp/dixie-intel-test.log")
+        try:
+            cron = generate_crontab()
+            assert ">> /tmp/dixie-intel-test.log" in cron
+            assert "/var/log/dixie-intel.log" not in cron
+        finally:
+            monkeypatch.delenv("DIXIE_INTEL_CRON_LOG_PATH", raising=False)
+
+
+class TestNvdCollectorSafetyCaps:
+    def test_fetches_multiple_pages(self, monkeypatch):
+        from dixie.intel.collectors.nvd import NvdCollector
+
+        calls = {"n": 0}
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            calls["n"] += 1
+            start = int((params or {}).get("startIndex", 0))
+
+            class Resp:
+                def raise_for_status(self) -> None:
+                    pass
+
+                def json(self) -> dict:
+                    if start == 0:
+                        return {
+                            "totalResults": 3,
+                            "vulnerabilities": [
+                                {
+                                    "cve": {
+                                        "id": f"CVE-2026-{i:04d}",
+                                        "descriptions": [{"lang": "en", "value": "x"}],
+                                        "metrics": {},
+                                        "published": "2026-01-01T00:00:00.000",
+                                        "lastModified": "2026-01-01T00:00:00.000",
+                                        "weaknesses": [],
+                                    },
+                                }
+                                for i in range(2)
+                            ],
+                        }
+                    return {
+                        "totalResults": 3,
+                        "vulnerabilities": [
+                            {
+                                "cve": {
+                                    "id": "CVE-2026-9999",
+                                    "descriptions": [{"lang": "en", "value": "y"}],
+                                    "metrics": {},
+                                    "published": "2026-01-01T00:00:00.000",
+                                    "lastModified": "2026-01-01T00:00:00.000",
+                                    "weaknesses": [],
+                                },
+                            },
+                        ],
+                    }
+
+            return Resp()
+
+        monkeypatch.setattr("dixie.intel.collectors.nvd.httpx.get", fake_get)
+        coll = NvdCollector()
+        entries = coll.fetch()
+        assert len(entries) == 3
+        assert calls["n"] == 2
+
+    def test_stops_after_max_api_pages(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from dixie.intel.collectors.nvd import NvdCollector
+
+        calls = {"n": 0}
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            calls["n"] += 1
+            start = int((params or {}).get("startIndex", 0))
+
+            class Resp:
+                def raise_for_status(self) -> None:
+                    pass
+
+                def json(self) -> dict:
+                    return {
+                        "totalResults": 500,
+                        "vulnerabilities": [
+                            {
+                                "cve": {
+                                    "id": f"CVE-2026-{start + i:05d}",
+                                    "descriptions": [{"lang": "en", "value": "x"}],
+                                    "metrics": {},
+                                    "published": "2026-01-01T00:00:00.000",
+                                    "lastModified": "2026-01-01T00:00:00.000",
+                                    "weaknesses": [],
+                                },
+                            }
+                            for i in range(200)
+                        ],
+                    }
+
+            return Resp()
+
+        monkeypatch.setattr("dixie.intel.collectors.nvd.httpx.get", fake_get)
+        with caplog.at_level(logging.WARNING):
+            entries = NvdCollector(max_api_pages=1).fetch()
+        assert len(entries) == 200
+        assert calls["n"] == 1
+        assert "max_api_pages cap" in caplog.text
+
+    def test_paginates_when_total_results_absent_but_more_pages(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from dixie.intel.collectors.nvd import NvdCollector
+
+        calls = {"n": 0}
+
+        def _cve(i: int) -> dict:
+            return {
+                "cve": {
+                    "id": f"CVE-2026-{i:04d}",
+                    "descriptions": [{"lang": "en", "value": f"v{i}"}],
+                    "metrics": {},
+                    "published": "2026-01-01T00:00:00.000",
+                    "lastModified": "2026-01-01T00:00:00.000",
+                    "weaknesses": [],
+                },
+            }
+
+        def fake_get(url, params=None, headers=None, timeout=None):
+            calls["n"] += 1
+            start = int((params or {}).get("startIndex", 0))
+
+            class Resp:
+                def raise_for_status(self) -> None:
+                    pass
+
+                def json(self) -> dict:
+                    if start == 0:
+                        return {"vulnerabilities": [_cve(1), _cve(2)]}
+                    if start == 2:
+                        return {"totalResults": None, "vulnerabilities": [_cve(3)]}
+                    return {"vulnerabilities": []}
+
+            return Resp()
+
+        monkeypatch.setattr("dixie.intel.collectors.nvd.httpx.get", fake_get)
+        entries = NvdCollector(max_api_pages=10).fetch()
+        assert len(entries) == 3
+        assert calls["n"] == 3
+
+
+class TestEnvInt:
+    def test_env_int_default_and_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from dixie.intel.envparse import env_int
+
+        monkeypatch.delenv("DIXIE_TEST_INT", raising=False)
+        assert env_int("DIXIE_TEST_INT", 7) == 7
+        monkeypatch.setenv("DIXIE_TEST_INT", "42")
+        assert env_int("DIXIE_TEST_INT", 7) == 42
+
+    def test_env_int_invalid_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from dixie.intel.envparse import env_int
+
+        monkeypatch.setenv("DIXIE_TEST_INT", "nan")
+        assert env_int("DIXIE_TEST_INT", 99) == 99
 
 
 class TestThreatEntry:

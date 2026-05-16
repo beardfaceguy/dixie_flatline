@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
@@ -10,6 +11,8 @@ import httpx
 
 from dixie.intel.collectors.base import Collector
 from dixie.intel.schema import ExploitMaturity, IntelSource, ThreatEntry
+
+logger = logging.getLogger(__name__)
 
 FEED_URLS = [
     "https://packetstormsecurity.com/feeds/currentexploits",
@@ -33,7 +36,8 @@ class PacketStormCollector(Collector):
                 )
                 resp.raise_for_status()
                 break
-            except Exception:
+            except Exception as e:
+                logger.warning("Packet Storm fetch failed for %s: %s", url, e)
                 continue
 
         if resp is None:

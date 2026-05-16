@@ -8,6 +8,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
+from dixie.constants import DEFAULT_LLM_MODEL
+
 
 class EngagementMode(str, Enum):
     RECON = "recon"
@@ -15,7 +17,7 @@ class EngagementMode(str, Enum):
 
 
 class LLMConfig(BaseModel):
-    model: str = "openai/gpt-4o"
+    model: str = DEFAULT_LLM_MODEL
     temperature: float = 0.2
     max_tokens: int = 4096
     api_base: str | None = None
@@ -27,6 +29,20 @@ class SandboxConfig(BaseModel):
     memory_limit: str = "512m"
     cpu_limit: float = 1.0
     network_mode: str = "bridge"
+
+
+class ToolDefaultsConfig(BaseModel):
+    """Per-engagement defaults merged into tool calls when the model omits an argument."""
+
+    gobuster_wordlist: str | None = Field(
+        default=None,
+        description="Wordlist path for gobuster_dir when the LLM does not pass wordlist.",
+    )
+    masscan_max_rate: int | None = Field(
+        default=None,
+        ge=1,
+        description="Caps masscan --rate (pps). When unset, DEFAULT_MASSCAN_MAX_RATE is used.",
+    )
 
 
 class AgentConfig(BaseModel):
@@ -61,6 +77,7 @@ class EngagementConfig(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    tool_defaults: ToolDefaultsConfig = Field(default_factory=ToolDefaultsConfig)
 
     @classmethod
     def from_file(cls, path: Path) -> EngagementConfig:

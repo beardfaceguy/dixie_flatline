@@ -9,6 +9,7 @@ and CSS/regex selectors for extracting posts.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ import httpx
 
 from dixie.intel.collectors.base import Collector
 from dixie.intel.schema import ExploitMaturity, IntelSource, ThreatEntry
+
+logger = logging.getLogger(__name__)
 
 TOR_PROXY = "socks5h://127.0.0.1:9050"
 
@@ -124,7 +127,8 @@ class ForumCollector(Collector):
             try:
                 forum_entries = self._scrape_forum(config)
                 entries.extend(forum_entries)
-            except Exception:
+            except Exception as e:
+                logger.warning("Forum collector failed for %s: %s", config.name, e)
                 continue
 
         return entries

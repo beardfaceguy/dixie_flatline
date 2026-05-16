@@ -148,7 +148,6 @@ class IntelStore:
 
     def get_critical_recent(self, hours: int = 24) -> list[ThreatEntry]:
         """Get critical findings from the last N hours (CVSS >= 9.0 or actively exploited)."""
-        since = datetime.now(timezone.utc).isoformat()
         rows = self._conn.execute(
             """SELECT * FROM threat_entries
             WHERE (severity >= 9.0 OR exploit_maturity = 'actively_exploited')
