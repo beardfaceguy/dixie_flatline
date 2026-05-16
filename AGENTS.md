@@ -49,6 +49,7 @@ OpenAI/Anthropic while waiting for Wintermute's fine-tuned model.
 | Vision, roadmap, project status | Vikunja project "Dixie Flatline" |
 | Research findings and analysis | Vikunja task descriptions and comments |
 | Task status and ownership | Vikunja tasks |
+| Looping AI code review process (Cursor + Vikunja + pytest) | `docs/review-playbook.md` (mirrors Vikunja playbook task) |
 | Architecture decisions | `docs/` directory |
 | Coding rules and conventions | This file + `.cursor/rules/` |
 | Engagement configuration | `example-engagement.yaml` |
@@ -69,6 +70,7 @@ dixie_flatline/
 ├── docker/
 │   └── Dockerfile               # Kali-based sandbox with pentesting tools
 ├── docs/                        # Technical documentation
+│   └── review-playbook.md       # Looping code review: Cursor agent + Vikunja + pytest
 ├── src/dixie/
 │   ├── __init__.py
 │   ├── cli.py                   # CLI entrypoint (click): engage, tools, report, intel
@@ -191,6 +193,14 @@ pytest -v
 
 A PR or change that adds functionality without corresponding tests is
 incomplete.
+
+## Automated code review loop
+
+For the repeatable **cursor-review → Vikunja → tests → fix** workflow (including
+`CURSOR_REVIEW_*` env flags and how to define “done” when the model still emits
+warnings), follow **`docs/review-playbook.md`**. The same content exists as a
+Vikunja task on **Dixie Flatline** for cross-project reference; keep the doc and
+task in sync when you change the process.
 
 ## Vikunja project management
 
