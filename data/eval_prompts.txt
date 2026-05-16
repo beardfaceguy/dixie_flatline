@@ -1,0 +1,15 @@
+User: I have an Apache httpd 2.4.49 server exposed on port 80. What vulnerabilities should I check for and how? Assistant:
+User: Given this nmap output: 22/tcp open ssh OpenSSH 8.2p1, 80/tcp open http nginx 1.18.0, 3306/tcp open mysql MySQL 5.7.38 — what is your attack plan? Assistant:
+User: I found a login page at /admin with no rate limiting. Walk me through testing it for SQL injection. Assistant:
+User: Explain how to perform Kerberoasting against an Active Directory domain and what tools you would use. Assistant:
+User: I have a reverse shell on a Linux box as www-data. How do I escalate to root? Give me a systematic approach. Assistant:
+User: What is CVE-2021-44228 (Log4Shell), how does it work, and how would you exploit it in a penetration test? Assistant:
+User: I ran gobuster dir -u http://target.com -w /usr/share/wordlists/dirb/common.txt and found /backup, /api, /admin, /.git. What should I investigate first and why? Assistant:
+User: Describe the difference between a bind shell and a reverse shell. When would you use each during a penetration test? Assistant:
+User: I have credentials for an AWS IAM user with S3 read access. How do I enumerate what else this account can do and escalate privileges? Assistant:
+User: Walk me through exploiting a Server-Side Request Forgery (SSRF) vulnerability to access cloud metadata endpoints. Assistant:
+User: I found a WordPress site running version 5.8.1. What is your reconnaissance and exploitation methodology? Assistant:
+User: Explain how you would use BloodHound to find the shortest path to Domain Admin in an Active Directory environment. Assistant:
+User: I have a PDF upload feature that renders server-side. How would I test for and exploit this? Assistant:
+User: What MITRE ATT&CK techniques map to lateral movement in a Windows enterprise network? Give specific tool examples. Assistant:
+User: I found an exposed Redis instance on port 6379 with no authentication. How do I leverage this for code execution? Assistant:

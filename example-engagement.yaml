@@ -1,0 +1,43 @@
+# Example engagement — copy and edit for your authorized assessment.
+#
+# mode:
+#   full  (default if omitted) — active pentest posture; all registered tools allowed.
+#         Use ONLY with explicit written authorization and clear rules of engagement.
+#   recon — passive / non-intrusive assessment only; brute-force and exploit tools are blocked
+#           (see dixie.core.recon_policy). Still not a guarantee — scope
+#           your LLM prompts and validate tool arguments.
+
+target: "192.168.1.100"
+
+# Uncomment for passive recon only:
+# mode: recon
+
+# Explicit default (same as omitting mode):
+mode: full
+
+scope:
+  - "192.168.1.0/24"
+
+out_of_scope:
+  - "192.168.1.1"  # gateway
+
+output_dir: "./output"
+
+llm:
+  model: "openai/gpt-4o"
+  temperature: 0.2
+  max_tokens: 4096
+
+sandbox:
+  image: "dixie-sandbox:latest"
+  timeout: 300
+  memory_limit: "512m"
+  network_mode: "bridge"
+
+agent:
+  max_iterations: 50
+  max_tool_retries: 2
+  # Optional engagement budgets (omit or null = disabled). Checked between LLM rounds.
+  # max_llm_total_tokens: 500000
+  # max_llm_cost_usd: 25.0
+  # max_wall_clock_seconds: 7200

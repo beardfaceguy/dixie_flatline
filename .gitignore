@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.env
+.env.*
+!.env.example
+.linear_import_vikunja/
+
+# Large generated SFT corpora / mirrors (rebuild via data/prepare_pentest_sft.py)
+data/dixie_pentest/

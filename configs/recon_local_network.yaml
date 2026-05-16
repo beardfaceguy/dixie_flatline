@@ -1,0 +1,24 @@
+target: "192.168.1.0/24"
+mode: recon
+
+scope:
+  - "192.168.1.0/24"
+
+out_of_scope: []
+
+output_dir: ./output/local_recon
+
+llm:
+  model: openai/gpt-4o
+  temperature: 0.1
+  max_tokens: 4096
+
+sandbox:
+  image: dixie-sandbox:latest
+  timeout: 600
+  memory_limit: 1g
+  cpu_limit: 2.0
+  network_mode: host
+
+agent:
+  max_iterations: 30
