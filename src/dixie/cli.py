@@ -83,6 +83,49 @@ def tools() -> None:
             console.print(f"  {req} {param.name}: {param.description}")
 
 
+@main.command("bakeoff")
+@click.argument("suite_file", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--candidate",
+    "candidate_ids",
+    multiple=True,
+    help="Run only this candidate id (repeatable). Defaults to all enabled candidates.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("./output/bakeoff"),
+    show_default=True,
+    help="Directory for bakeoff.json and bakeoff.md.",
+)
+def bakeoff(suite_file: Path, candidate_ids: tuple[str, ...], output_dir: Path) -> None:
+    """Compare model endpoints using a versioned deterministic scenario suite."""
+    from dixie.evaluation import BakeoffRunner, BakeoffSuite, render_markdown
+
+    suite = BakeoffSuite.from_file(suite_file)
+    runner = BakeoffRunner(build_default_registry())
+    selected = set(candidate_ids) if candidate_ids else None
+    try:
+        result = runner.run(suite, selected_candidates=selected)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / "bakeoff.json"
+    markdown_path = output_dir / "bakeoff.md"
+    json_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+    markdown_path.write_text(render_markdown(result), encoding="utf-8")
+
+    console.print("\n[bold]Bakeoff ranking[/bold]")
+    for rank, candidate in enumerate(result.ranked_results(), start=1):
+        console.print(
+            f"  {rank}. [bold]{candidate.candidate_id}[/bold] "
+            f"{candidate.score:.1%} ({candidate.passed_checks}/{candidate.total_checks})"
+        )
+    console.print(f"[green]JSON results written to {json_path}[/green]")
+    console.print(f"[green]Markdown report written to {markdown_path}[/green]")
+
+
 @main.group()
 def report() -> None:
     """Report generation commands."""

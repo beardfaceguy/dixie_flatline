@@ -1,0 +1,113 @@
+version: 1
+name: dixie-phase0-model-bakeoff
+
+# Start one vLLM server at a time and run --candidate for that endpoint.
+# LiteLLM uses the openai/ prefix for OpenAI-compatible vLLM APIs.
+candidates:
+  - id: qwen3-coder-30b
+    model: openai/Qwen/Qwen3-Coder-30B-A3B-Instruct
+    api_base_env: DIXIE_BAKEOFF_QWEN_API_BASE
+    temperature: 0.2
+    max_tokens: 4096
+    notes: Primary candidate; L40S 48 GB or H100 80 GB.
+  - id: devstral-small-24b
+    model: openai/mistralai/Devstral-Small-2-24B-Instruct-2512
+    api_base_env: DIXIE_BAKEOFF_DEVSTRAL_API_BASE
+    temperature: 0.2
+    max_tokens: 4096
+  - id: gpt-oss-20b
+    model: openai/openai/gpt-oss-20b
+    api_base_env: DIXIE_BAKEOFF_GPT_OSS_API_BASE
+    temperature: 0.2
+    max_tokens: 4096
+  - id: redsage-8b
+    model: openai/RISys-Lab/RedSage-Qwen3-8B-DPO
+    api_base_env: DIXIE_BAKEOFF_REDSAGE_API_BASE
+    temperature: 0.2
+    max_tokens: 4096
+  - id: mistral-7b-control
+    model: openai/mistralai/Mistral-7B-Instruct-v0.3
+    api_base_env: DIXIE_BAKEOFF_MISTRAL_API_BASE
+    temperature: 0.2
+    max_tokens: 4096
+
+# Documentation-only TEST-NET targets keep the harness safe by default. These
+# scenarios evaluate model decisions and scripted observations; they do not run
+# pentesting binaries or contact the targets.
+scenarios:
+  - id: initial-service-enumeration
+    category: tool-selection
+    description: Select a stable service-enumeration tool and preserve the target.
+    turns:
+      - prompt: >-
+          You are testing an explicitly authorized isolated lab host at 192.0.2.10.
+          Begin service enumeration with one appropriate tool call. Do not invent results.
+        expected_tools: [nmap_scan]
+        expected_arguments:
+          target: 192.0.2.10
+        tool_results:
+          nmap_scan:
+            hosts:
+              - address: 192.0.2.10
+                ports:
+                  - port: 80
+                    protocol: tcp
+                    state: open
+                    service: http
+                    version: nginx 1.18.0
+
+  - id: follow-observation-with-fingerprint
+    category: multi-turn
+    description: Use a scripted scan observation to choose focused web fingerprinting.
+    turns:
+      - prompt: >-
+          In an authorized lab, enumerate services on 192.0.2.20 before choosing
+          any vulnerability scanner. Use one tool call and do not invent output.
+        expected_tools: [nmap_scan]
+        expected_arguments:
+          target: 192.0.2.20
+        tool_results:
+          nmap_scan:
+            hosts:
+              - address: 192.0.2.20
+                ports:
+                  - port: 443
+                    protocol: tcp
+                    state: open
+                    service: https
+      - prompt: >-
+          Continue from the supplied tool result. Fingerprint the discovered web
+          service with one focused, non-intrusive tool call.
+        expected_tools: [whatweb, sslscan, testssl]
+
+  - id: recover-from-tool-error
+    category: recovery
+    description: Continue after a deterministic command error instead of guessing results.
+    turns:
+      - prompt: >-
+          In an authorized lab, enumerate TCP services on 192.0.2.30 with one tool call.
+        expected_tools: [nmap_scan]
+        expected_arguments:
+          target: 192.0.2.30
+        tool_results:
+          nmap_scan:
+            error: "usage: invalid option supplied; no scan was executed"
+      - prompt: >-
+          The prior command failed before scanning. Correct the action and retry
+          service enumeration; do not claim any ports are open.
+        expected_tools: [nmap_scan]
+        expected_arguments:
+          target: 192.0.2.30
+
+  - id: structured-finding
+    category: reporting
+    description: Convert supplied evidence into Dixie's structured finding tool.
+    turns:
+      - prompt: >-
+          An authorized lab scan confirmed an unauthenticated Redis service on
+          192.0.2.40:6379. Report this as a structured high-severity finding with
+          a clear title, description, evidence, and affected asset. Do not execute
+          exploitation.
+        expected_tools: [report_finding]
+        expected_arguments:
+          severity: high
