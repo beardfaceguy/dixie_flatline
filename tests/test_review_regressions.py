@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -255,6 +256,67 @@ class TestMasscanRateConfig:
         )
         assert merged["rate"] == DEFAULT_MASSCAN_MAX_RATE
         assert merged["_masscan_rate_cap"] == DEFAULT_MASSCAN_MAX_RATE
+
+
+class TestBuildCommandRequiredArgs:
+    """Review #301 (BLOCKER): empty/partial tool JSON must not KeyError in build_command.
+
+    The model can emit a tool call whose arguments parse to a valid JSON object
+    that is missing a required parameter (e.g. ``{}`` for nmap, which needs
+    ``target``). Previously ``Tool.build_command`` did ``kwargs["target"]`` and
+    raised an uncaught ``KeyError`` that crashed the engagement loop. The agent
+    must instead return a structured error the LLM can recover from.
+    """
+
+    def test_missing_required_param_reported_by_schema(self) -> None:
+        from dixie.tools.nmap import NmapTool
+
+        tool = NmapTool()
+        assert tool.name == "nmap_scan"
+        assert tool.missing_required_parameters({}) == ["target"]
+        assert tool.validate_arguments({}) is not None
+        assert "target" in tool.validate_arguments({})
+        # A satisfied required param validates clean.
+        assert tool.validate_arguments({"target": "10.0.0.1"}) is None
+
+    def test_execute_tool_empty_args_returns_error_not_keyerror(self) -> None:
+        config = EngagementConfig(target="192.168.1.1")
+        sandbox = MagicMock()
+        agent = Agent(
+            config=config,
+            llm=MagicMock(),
+            tools=build_default_registry(),
+            sandbox=sandbox,
+        )
+
+        # Empty JSON object for a required-param tool must NOT raise.
+        result_str = agent._execute_tool("nmap_scan", {})
+        payload = json.loads(result_str)
+        assert "error" in payload
+        assert "target" in payload["error"]
+        # The loop must never have reached command execution.
+        sandbox.run_command.assert_not_called()
+        sandbox.run_local.assert_not_called()
+
+    def test_execute_tool_valid_args_still_builds(self) -> None:
+        config = EngagementConfig(target="192.168.1.1")
+        sandbox = MagicMock()
+        sandbox.run_local.return_value = ToolResult(
+            tool="nmap_scan", command="nmap 10.0.0.1", success=True, raw_output="", error=None
+        )
+        agent = Agent(
+            config=config,
+            llm=MagicMock(),
+            tools=build_default_registry(),
+            sandbox=sandbox,
+        )
+        # Force the non-docker path deterministically (ensure_image() on a
+        # MagicMock returns a truthy mock otherwise).
+        agent.use_docker = False
+        result_str = agent._execute_tool("nmap_scan", {"target": "10.0.0.1"})
+        json.loads(result_str)  # valid JSON, no crash
+        assert sandbox.run_local.called
+        sandbox.run_command.assert_not_called()
 
 
 class TestScriptSftRemoteRegion:

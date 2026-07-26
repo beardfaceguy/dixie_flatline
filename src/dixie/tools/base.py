@@ -31,6 +31,41 @@ class Tool(ABC):
     #: When True, :attr:`name` is denied in recon mode (merged into recon policy).
     recon_blocked: ClassVar[bool] = False
 
+    def missing_required_parameters(self, arguments: dict[str, Any]) -> list[str]:
+        """Return the names of required parameters absent from ``arguments``.
+
+        A parameter is considered satisfied when a key is present with a
+        non-``None`` value. Tools with a schema default for a required
+        parameter are treated as satisfied even when the caller omits it,
+        since ``build_command`` can fall back to that default.
+        """
+        missing: list[str] = []
+        for param in self.parameters:
+            if not param.required:
+                continue
+            if param.default is not None:
+                continue
+            value = arguments.get(param.name)
+            if value is None:
+                missing.append(param.name)
+        return missing
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> str | None:
+        """Validate ``arguments`` against the schema before building a command.
+
+        Returns an error message when required parameters are missing, or
+        ``None`` when the arguments are usable. This guards ``build_command``
+        against malformed / empty tool-call payloads (e.g. the model emitting
+        ``{}``) which would otherwise raise an uncaught ``KeyError``.
+        """
+        missing = self.missing_required_parameters(arguments)
+        if missing:
+            return (
+                f"Tool '{self.name}' called without required parameter(s): "
+                f"{', '.join(missing)}. Provide them and retry."
+            )
+        return None
+
     @abstractmethod
     def build_command(self, **kwargs: Any) -> list[str]:
         """Build the CLI command from parameters."""

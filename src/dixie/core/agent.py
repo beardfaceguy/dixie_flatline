@@ -242,7 +242,23 @@ class Agent:
             return json.dumps({"error": f"Unknown tool: {name}"})
 
         arguments = self._merge_engagement_tool_defaults(name, arguments)
-        command = tool.build_command(**arguments)
+
+        validation_error = tool.validate_arguments(arguments)
+        if validation_error is not None:
+            console.print(f"  [bold red]INVALID CALL:[/bold red] {validation_error}")
+            return json.dumps({"error": validation_error})
+
+        try:
+            command = tool.build_command(**arguments)
+        except (KeyError, TypeError) as exc:
+            msg = (
+                f"Tool '{name}' received malformed arguments and could not build a "
+                f"command ({type(exc).__name__}: {exc}). Check the required parameters "
+                f"and retry."
+            )
+            logger.warning("build_command failed for tool=%s: %s", name, exc, exc_info=True)
+            console.print(f"  [bold red]INVALID CALL:[/bold red] {msg}")
+            return json.dumps({"error": msg})
         console.print(f"  [dim]$ {' '.join(command)}[/dim]")
 
         max_retry = self.config.agent.max_tool_retries
