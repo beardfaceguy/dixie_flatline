@@ -14,8 +14,11 @@ from dixie.intel.collectors.exploit_intel import ExploitIntelCollector
 from dixie.intel.collectors.exploitdb import ExploitDbCollector
 from dixie.intel.collectors.forums import ForumCollector
 from dixie.intel.collectors.full_disclosure import FullDisclosureCollector
+from dixie.intel.collectors.gov_breach import GovernmentBreachAggregator
+from dixie.intel.collectors.hibp import HibpBreachCollector
 from dixie.intel.collectors.nvd import NvdCollector
 from dixie.intel.collectors.packetstorm import PacketStormCollector
+from dixie.intel.collectors.pastebin import PastebinLeakCollector
 from dixie.intel.collectors.reddit import RedditCollector
 from dixie.intel.collectors.sploitus import SploitusCollector
 from dixie.intel.collectors.telegram import TelegramCollector
@@ -36,12 +39,16 @@ def build_collectors(
     telegram_channels: list[str] | None = None,
     use_tor: bool = False,
     onion_urls: dict[str, str] | None = None,
+    enable_breach_intel: bool = True,
+    hibp_api_key: str | None = None,
+    pastebin_api_key: str | None = None,
+    target_domains: list[str] | None = None,
 ) -> list[Collector]:
     """Build collectors up to the specified tier.
 
-    Tier 1: Structured APIs (CISA KEV, EIP, NVD, Full Disclosure)
+    Tier 1: Structured APIs (CISA KEV, EIP, NVD, Full Disclosure, HIBP, Gov Breach)
     Tier 2: Semi-structured feeds (Sploitus, Packet Storm, Exploit-DB)
-    Tier 3: Unstructured/social (Reddit, Telegram, Forums)
+    Tier 3: Unstructured/social (Reddit, Telegram, Forums, Pastebin)
     """
     collectors: list[Collector] = []
 
@@ -63,6 +70,11 @@ def build_collectors(
         FullDisclosureCollector(),
     ])
 
+    # Tier 1 breach intelligence (free, structured APIs)
+    if enable_breach_intel:
+        collectors.append(HibpBreachCollector(api_key=hibp_api_key))
+        collectors.append(GovernmentBreachAggregator())
+
     if tier >= 2:
         collectors.extend([
             SploitusCollector(),
@@ -79,6 +91,15 @@ def build_collectors(
             ForumCollector(use_tor=use_tor, onion_urls=onion_urls),
         ])
 
+        # Tier 3 breach intelligence (scraping-based)
+        if enable_breach_intel:
+            collectors.append(
+                PastebinLeakCollector(
+                    api_dev_key=pastebin_api_key,
+                    target_domains=target_domains,
+                )
+            )
+
     return collectors
 
 
@@ -91,6 +112,10 @@ def run_pipeline(
     onion_urls: dict[str, str] | None = None,
     translate: bool = False,
     translate_model: str = DEFAULT_TRANSLATION_MODEL,
+    enable_breach_intel: bool = True,
+    hibp_api_key: str | None = None,
+    pastebin_api_key: str | None = None,
+    target_domains: list[str] | None = None,
 ) -> tuple[IntelStore, list[FeedStatus]]:
     """Run all collectors and return the store + feed statuses."""
     store = IntelStore(db_path)
@@ -100,6 +125,10 @@ def run_pipeline(
         telegram_channels=telegram_channels,
         use_tor=use_tor,
         onion_urls=onion_urls,
+        enable_breach_intel=enable_breach_intel,
+        hibp_api_key=hibp_api_key,
+        pastebin_api_key=pastebin_api_key,
+        target_domains=target_domains,
     )
     statuses = []
 

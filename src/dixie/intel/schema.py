@@ -21,6 +21,9 @@ class IntelSource(str, Enum):
     FORUM = "forum"
     REDDIT = "reddit"
     MANUAL = "manual"
+    HIBP = "hibp"  # Have I Been Pwned
+    PASTEBIN = "pastebin"
+    GOV_BREACH = "gov_breach"  # Government breach notifications (HHS, etc.)
 
 
 class ExploitMaturity(str, Enum):
