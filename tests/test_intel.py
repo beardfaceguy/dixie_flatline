@@ -112,6 +112,43 @@ class TestIntelStore:
         assert stats["by_source"]["nvd"] == 1
         assert stats["by_source"]["cisa_kev"] == 1
 
+    def test_count_by_source(self):
+        self.store.upsert(_make_entry(id="a", source=IntelSource.NVD))
+        self.store.upsert(_make_entry(id="b", source=IntelSource.NVD))
+        self.store.upsert(_make_entry(id="c", source=IntelSource.CISA_KEV))
+
+        assert self.store.count_by_source(IntelSource.NVD) == 2
+        assert self.store.count_by_source(IntelSource.CISA_KEV) == 1
+        assert self.store.count_by_source(IntelSource.REDDIT) == 0
+
+    def test_fetch_pending_translation(self):
+        # Pending: non-English with no preserved original text yet.
+        pending = _make_entry(id="ru", cve_id="CVE-2026-9001")
+        pending.language = "ru"
+        pending.raw_text = None
+        self.store.upsert(pending)
+        # Not pending: already English.
+        self.store.upsert(_make_entry(id="en", cve_id="CVE-2026-9002"))
+        # Not pending: non-English but original already preserved.
+        done = _make_entry(id="de", cve_id="CVE-2026-9003")
+        done.language = "de"
+        done.raw_text = "original text"
+        self.store.upsert(done)
+
+        results = self.store.fetch_pending_translation(limit=50)
+
+        assert [e.id for e in results] == ["ru"]
+        assert all(isinstance(e, ThreatEntry) for e in results)
+
+    def test_fetch_pending_translation_respects_limit(self):
+        for i in range(3):
+            e = _make_entry(id=f"ru{i}", cve_id=f"CVE-2026-70{i}")
+            e.language = "ru"
+            e.raw_text = None
+            self.store.upsert(e)
+
+        assert len(self.store.fetch_pending_translation(limit=2)) == 2
+
     def test_feed_status(self):
         status = FeedStatus(
             source=IntelSource.NVD,

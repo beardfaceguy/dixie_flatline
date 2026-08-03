@@ -34,10 +34,7 @@ class Collector(ABC):
         try:
             entries = self.fetch()
             new, updated = store.bulk_upsert(entries)
-            total = store._conn.execute(
-                "SELECT COUNT(*) FROM threat_entries WHERE source = ?",
-                (self.source.value,),
-            ).fetchone()[0]
+            total = store.count_by_source(self.source)
 
             status.last_success = datetime.now(timezone.utc)
             status.entries_last_run = new

@@ -146,6 +146,29 @@ class IntelStore:
 
         return [self._row_to_entry(row) for row in rows]
 
+    def fetch_pending_translation(self, limit: int) -> list[ThreatEntry]:
+        """Entries awaiting translation: non-English with no preserved original.
+
+        Returns entries where ``language != 'en'`` and ``raw_text IS NULL``
+        (original text not yet stored, so translation hasn't been attempted),
+        newest first, capped at ``limit``.
+        """
+        rows = self._conn.execute(
+            """SELECT * FROM threat_entries
+            WHERE language != 'en' AND raw_text IS NULL
+            ORDER BY first_seen DESC
+            LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [self._row_to_entry(row) for row in rows]
+
+    def count_by_source(self, source: IntelSource) -> int:
+        """Count stored entries originating from a given feed source."""
+        return self._conn.execute(
+            "SELECT COUNT(*) FROM threat_entries WHERE source = ?",
+            (source.value,),
+        ).fetchone()[0]
+
     def get_critical_recent(self, hours: int = 24) -> list[ThreatEntry]:
         """Get critical findings from the last N hours (CVSS >= 9.0 or actively exploited)."""
         rows = self._conn.execute(

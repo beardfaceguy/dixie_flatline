@@ -104,20 +104,13 @@ def translate_pending(
 
     eff_limit = limit if limit is not None else env_int("DIXIE_INTEL_TRANSLATE_LIMIT", 50)
 
-    rows = store._conn.execute(
-        """SELECT * FROM threat_entries
-        WHERE language != 'en' AND raw_text IS NULL
-        ORDER BY first_seen DESC
-        LIMIT ?""",
-        (eff_limit,),
-    ).fetchall()
+    entries = store.fetch_pending_translation(eff_limit)
 
-    if not rows:
+    if not entries:
         return 0
 
     count = 0
-    for row in rows:
-        entry = store._row_to_entry(row)
+    for entry in entries:
         translated = translate_entry(entry, model)
         store.upsert(translated)
         count += 1
